@@ -104,7 +104,7 @@ def build_embed():
 class SummaryView(View):
     @discord.ui.button(label="Refresh", style=discord.ButtonStyle.primary, custom_id="refresh")
     async def refresh(self, interaction: discord.Interaction, button: Button):
-        # Direct bijwerken; geen defer om double-ack te voorkomen
+        # direct bijwerken; geen defer → voorkomt double/unknown interaction
         try:
             await interaction.response.edit_message(embed=build_embed(), view=self)
         except discord.InteractionResponded:
@@ -112,12 +112,13 @@ class SummaryView(View):
 
 @tree.command(name="summary", description="Toon/refresh de 24u stats")
 async def summary(inter: discord.Interaction):
-    # Meteen ephemeral ack (voorkomt Unknown/Already acknowledged)
+    # 1) meteen ephemeraal bevestigen (ipv defer)
     try:
         await inter.response.send_message("📊 Summary wordt geplaatst…", ephemeral=True)
     except discord.InteractionResponded:
-        pass
+        pass  # al bevestigd? prima
 
+    # 2) de echte summary in het kanaal plaatsen
     ch = client.get_channel(CHANNEL_ID) if CHANNEL_ID else inter.channel
     await ch.send(embed=build_embed(), view=SummaryView())
 
