@@ -1,34 +1,25 @@
-# --- keep Render alive ---
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import os
+# --- keep-alive voor Render ---
+import threading, http.server, socketserver
 
-class KeepAliveHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b'PXstats bot is running!')
-
+PORT = 8080
+Handler = http.server.SimpleHTTPRequestHandler
 def run_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), KeepAliveHandler)
-    server.serve_forever()
-
+    with socketserver.TCPServer(("", PORT), Handler) as httpd:
+        httpd.serve_forever()
 threading.Thread(target=run_server, daemon=True).start()
 # --- end keep-alive ---
 
-import time, json
+import os, time, json
 from datetime import datetime, timedelta, timezone
-from dotenv import load_dotenv
 import discord
 from discord import app_commands
 from discord.ui import View, Button
 
-load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 
 DATA_FILE = "stats.json"
+
 
 def load_data():
     return json.load(open(DATA_FILE, "r", encoding="utf-8")) if os.path.exists(DATA_FILE) else {"events":[]}
