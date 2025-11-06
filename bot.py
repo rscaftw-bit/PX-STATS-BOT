@@ -3,6 +3,7 @@ import os
 import time
 import re
 import threading
+import unicodedata
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from collections import deque
 
@@ -26,35 +27,30 @@ client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
 # =========================
-# Simple keep-alive HTTP server (for Render)
+# Keep-alive HTTP server (Render)
 # =========================
 class _HealthzHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
+        self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
     def do_HEAD(self):
-        self.send_response(200)
-        self.end_headers()
-    def log_message(self, *args, **kwargs):
-        return
+        self.send_response(200); self.end_headers()
+    def log_message(self, *_, **__): return
 
 def start_keepalive():
     port = int(os.getenv("PORT", "10000"))
     server = HTTPServer(("", port), _HealthzHandler)
-    t = threading.Thread(target=server.serve_forever, daemon=True)
-    t.start()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
     print(f"[KEEPALIVE] Serving health on :{port}")
 
 # =========================
 # In-memory event storage
 # =========================
-EVENTS = deque(maxlen=10000)  # ring buffer
+EVENTS = deque(maxlen=10000)
 
-def add_event(evt_type: str, payload: dict):
+def add_event(evt_type: str, payload: dict, ts: float | None = None):
     EVENTS.append({
-        "ts": time.time(),     # epoch UTC
-        "type": evt_type,      # "Catch", "Shiny", "Raid", "Rocket", "Hatch", "Quest", "Reward", "Encounter"
+        "ts": ts if ts is not None else time.time(),
+        "type": evt_type,
         "data": payload or {}
     })
 
@@ -63,76 +59,93 @@ def last_24h():
     return [e for e in EVENTS if e["ts"] >= cutoff]
 
 # =========================
-# PolygonX embed parser
+# Parser helpers
 # =========================
 RC_PAT = re.compile(r"(rare\s*candy|rc)\s*[:xX]?\s*(\d+)", re.I)
-PKM_LINE_PAT = re.compile(r"^Pokemon:\s*([A-Za-zÀ-ÿ' .-]+)", re.I | re.M)  # vang bv. "Pokemon: Cottonee"
+IV_PAT = re.compile(r"IV\s*:\s*(\d{1,2})/(\d{1,2})/(\d{1,2})", re.I)
+PKM_LINE_PAT = re.compile(r"^\s*Pok[eé]mon:\s*([A-Za-zÀ-ÿ' .-]+|p\d+)", re.I | re.M)
+
+def _norm(s: str) -> str:
+    return unicodedata.normalize("NFKD", s or "").encode("ascii","ignore").decode().lower().strip()
 
 def _field_value(emb: discord.Embed, wanted_name: str):
+    wn = _norm(wanted_name)
     for f in emb.fields:
-        if (f.name or "").strip().lower() == wanted_name.lower():
+        fname = _norm(f.name or "")
+        if fname == wn or "pokemon" in fname:
             return (f.value or "").strip()
     return None
 
 def _extract_pokemon_name(e: discord.Embed):
-    # 1) Field "Pokemon"
+    # 1) Field
     val = _field_value(e, "Pokemon")
     if val:
         name = val.split("(")[0].strip()
-        if name:
-            return name
-
-    # 2) Description: "Pokemon: NAME"
+        if name: return name
+    # 2) Description
     if e.description:
         m = PKM_LINE_PAT.search(e.description)
-        if m:
-            return m.group(1).strip()
-
-    # 3) Title fallback: "Pokemon caught successfully!" / others -> nothing there, but try in parentheses
+        if m: return m.group(1).strip()
+    # 3) Title fallback
     title = (e.title or "")
-    m2 = re.search(r"([A-Za-zÀ-ÿ' .-]+)\s*\(", title)
-    if m2:
-        return m2.group(1).strip()
-
+    m2 = re.search(r"([A-Za-zÀ-ÿ' .-]+|p\d+)\s*\(", title)
+    if m2: return m2.group(1).strip()
     return "?"
 
+def _extract_iv_pct(e: discord.Embed) -> int | None:
+    # Zoek IV-lijn in fields/description
+    texts = [e.description or ""]
+    for f in e.fields:
+        texts.append(f"{f.name}\n{f.value}")
+    blob = "\n".join(texts)
+    m = IV_PAT.search(blob)
+    if not m: return None
+    atk, de, st = map(int, m.groups())
+    pct = round((atk + de + st) / 45 * 100)
+    return pct
+
+# =========================
+# PolygonX embed parser
+# =========================
 def parse_polygonx_embed(e: discord.Embed):
-    """
-    Return (evt_type, payload) or (None, None) if not recognized.
-    """
     title = (e.title or "").strip()
     t = title.lower()
 
-    # ---- Shiny (behandel eerst; sommige titels bevatten ook 'caught') ----
+    # Shiny
     if "shiny" in t:
-        return ("Shiny", {"name": _extract_pokemon_name(e)})
+        return ("Shiny", {"name": _extract_pokemon_name(e), "iv_pct": _extract_iv_pct(e)})
 
-    # ---- Catch success ----
+    # Catch
     if "pokemon caught successfully" in t or "caught successfully" in t:
-        return ("Catch", {"name": _extract_pokemon_name(e)})
+        return ("Catch", {"name": _extract_pokemon_name(e), "iv_pct": _extract_iv_pct(e)})
 
-    # ---- Incense Encounter ----
-    if "incense encounter" in t or "encounter" in t:
-        # voorkom dat 'rocket encounter' per ongeluk telt
-        if "rocket" not in t:
-            return ("Encounter", {"name": _extract_pokemon_name(e)})
+    # Fled (als PolygonX dat post)
+    if "fled" in t or "ran away" in t or "ran-away" in t:
+        return ("Fled", {"name": _extract_pokemon_name(e)})
 
-    # ---- Raids / Rockets / Hatches / Rewards ----
-    if "raid" in t:
-        return ("Raid", {"title": title})
-    if "rocket" in t:
-        return ("Rocket", {"title": title})
+    # Encounters (we tellen bewust alle encounters – ook voor runaways analyse)
+    if "encounter" in t and "rocket" not in t:
+        payload = {"name": _extract_pokemon_name(e)}
+        if "incense" in t: payload["incense"] = True
+        if "lure" in t:    payload["lure"] = True
+        return ("Encounter", payload)
+
+    # Overigen
+    if "lure" in t:        return ("Lure", {"title": title})
+    if "incense" in t:     return ("Incense", {"title": title})
+    if "max battle" in t:  return ("MaxBattle", {"title": title})
+    if "quest" in t:       return ("Quest", {"title": title})
+    if "rocket" in t:      return ("Rocket", {"title": title})
+    if "raid" in t:        return ("Raid", {"title": title})
     if "hatch" in t:
         return ("Hatch", {"name": _extract_pokemon_name(e) or title})
     if "reward" in t or "rewards" in t or "loot" in t:
         rare_candy = 0
         texts = [e.description or ""]
-        for f in e.fields:
-            texts.append(f"{f.name}\n{f.value}")
+        for f in e.fields: texts.append(f"{f.name}\n{f.value}")
         blob = "\n".join(texts)
         m = RC_PAT.search(blob)
-        if m:
-            rare_candy = int(m.group(2))
+        if m: rare_candy = int(m.group(2))
         return ("Reward", {"title": title, "rare_candy": rare_candy})
 
     return (None, None)
@@ -146,6 +159,10 @@ def build_stats():
     for r in rows:
         by_type[r["type"]] = by_type.get(r["type"], 0) + 1
 
+    # Speciale subcounters uit Encounter-payload
+    lure = sum(1 for r in rows if r["type"] == "Encounter" and r["data"].get("lure"))
+    incense = sum(1 for r in rows if r["type"] == "Encounter" and r["data"].get("incense"))
+
     s = {
         "encounters": by_type.get("Encounter", 0),
         "catches":    by_type.get("Catch", 0),
@@ -155,89 +172,112 @@ def build_stats():
         "hatches":    by_type.get("Hatch", 0),
         "quests":     by_type.get("Quest", 0),
         "rewards":    by_type.get("Reward", 0),
+        "max_battle": by_type.get("MaxBattle", 0),
+        "lure":       lure or by_type.get("Lure", 0),
+        "incense":    incense or by_type.get("Incense", 0),
+        "fled":       by_type.get("Fled", 0),
+
         "rare_candy": 0,
         "latest_catches": [],
         "latest_shinies": [],
         "latest_rewards": [],
-        "since_unix": min((r["ts"] for r in rows), default=time.time())
+        "since_unix": min((r["ts"] for r in rows), default=time.time()),
     }
 
-    # Sum rare candy
     for r in rows:
         if r["type"] == "Reward":
             rc = r["data"].get("rare_candy", 0) or r["data"].get("rc", 0)
-            try:
-                s["rare_candy"] += int(rc)
-            except Exception:
-                pass
+            try: s["rare_candy"] += int(rc)
+            except: pass
 
-    s["latest_catches"] = [r for r in rows if r["type"] == "Catch"][-3:]
-    s["latest_shinies"] = [r for r in rows if r["type"] == "Shiny"][-3:]
+    # afgeleide metrics
+    s["runaways"]  = max(0, s["encounters"] - s["catches"])
+    s["catch_rate"] = (s["catches"] / s["encounters"] * 100.0) if s["encounters"] > 0 else 0.0
+    s["shiny_rate"] = (s["shinies"] / s["catches"] * 100.0) if s["catches"] > 0 else 0.0
+
+    # laatste 5
+    s["latest_catches"] = [r for r in rows if r["type"] == "Catch"][-5:]
+    s["latest_shinies"] = [r for r in rows if r["type"] == "Shiny"][-5:]
     s["latest_rewards"] = [r for r in rows if r["type"] == "Reward"][-3:]
     return s
 
-def build_embed():
+def _fmt_when(ts: float, style: str = "f"):
+    # Discord timestamp markup: <t:unix:style>
+    return f"<t:{int(ts)}:{style}>"
+
+def build_embed(mode: str = "catch"):
+    """
+    mode: 'catch' → toon Catch rate
+          'shiny' → toon Shiny rate
+    """
     s = build_stats()
 
-    def fmt_latest(items):
-        if not items:
-            return "—"
-        names = []
-        for it in items:
-            nm = it["data"].get("name") or it["data"].get("title") or "?"
-            names.append(nm)
-        return ", ".join(names)
+    def fmt_latest(items, with_iv=True):
+        if not items: return "—"
+        lines = []
+        for it in items[::-1]:  # recentste bovenaan
+            name = it["data"].get("name") or it["data"].get("title") or "?"
+            ivp = it["data"].get("iv_pct")
+            ts = it["ts"]
+            if with_iv and ivp is not None:
+                lines.append(f"{name} **{ivp}%** ({_fmt_when(ts, 'f')})")
+            else:
+                lines.append(f"{name} ({_fmt_when(ts, 'f')})")
+        return "\n".join(lines[:5])
 
-    emb = discord.Embed(
-        title="📊 Today’s Stats (Last 24h)",
-        color=discord.Color.blurple()
+    emb = discord.Embed(title="📊 Today’s Stats (Last 24h)", color=discord.Color.blurple())
+
+    # Top rij zoals in je screenshot (inline)
+    emb.add_field(name="Encounters", value=str(s["encounters"]), inline=True)
+    emb.add_field(name="Catches",   value=str(s["catches"]), inline=True)
+    emb.add_field(name="Shinies",   value=str(s["shinies"]), inline=True)
+
+    # Event breakdown
+    breakdown = (
+        f"Encounter: {s['encounters']}\n"
+        f"Lure: {s['lure']}\n"
+        f"Incense: {s['incense']}\n"
+        f"Max Battle: {s['max_battle']}\n"
+        f"Quest: {s['quests']}\n"
+        f"Rocket Battle: {s['rockets']}\n"
+        f"Raid: {s['raids']}\n"
+        f"Hatch: {s['hatches']}\n"
+        f"Reward: {s['rewards']}"
     )
+    emb.add_field(name="**Event breakdown**", value=breakdown, inline=False)
 
-    emb.add_field(name="Encounters", value=str(s["encounters"]), inline=False)
-    emb.add_field(name="Catches", value=str(s["catches"]), inline=False)
-    emb.add_field(name="Shinies", value=str(s["shinies"]), inline=False)
-    emb.add_field(name="🧪 Rare Candy earned", value=str(s["rare_candy"]), inline=False)
+    # Rate-blok + rare candy + runaways
+    if mode == "catch":
+        emb.add_field(name="🎯 Catch rate", value=f"{s['catch_rate']:.1f}%", inline=True)
+    else:
+        emb.add_field(name="✨ Shiny rate", value=f"{s['shiny_rate']:.3f}%", inline=True)
+    emb.add_field(name="🏃 Runaways (est.)", value=str(s["runaways"]), inline=True)
+    emb.add_field(name="🍬 Rare Candy earned", value=str(s["rare_candy"]), inline=True)
 
-    emb.add_field(
-        name="Event breakdown",
-        value=(
-            f"Encounter: {s['encounters']}\n"
-            f"Lure: 0\n"
-            f"Incense: 0\n"
-            f"Max Battle: 0\n"
-            f"Quest: {s['quests']}\n"
-            f"Rocket Battle: {s['rockets']}\n"
-            f"Raid: {s['raids']}\n"
-            f"Hatch: {s['hatches']}\n"
-            f"Reward: {s['rewards']}"
-        ),
-        inline=False
-    )
+    # Latest lists
+    emb.add_field(name="🕓 Latest Catches", value=fmt_latest(s["latest_catches"], with_iv=True), inline=False)
+    emb.add_field(name="✨ Latest Shinies", value=fmt_latest(s["latest_shinies"], with_iv=True), inline=False)
+    emb.add_field(name="🎁 Recent Rewards", value=fmt_latest(s["latest_rewards"], with_iv=False), inline=False)
 
-    since = time.strftime('%d/%m/%y %H:%M', time.localtime(s["since_unix"]))
-    emb.add_field(name="⚪ Latest Catches", value=fmt_latest(s["latest_catches"]), inline=False)
-    emb.add_field(name="✨ Latest Shinies", value=fmt_latest(s["latest_shinies"]), inline=False)
-    emb.add_field(name="🎁 Recent Rewards", value=fmt_latest(s["latest_rewards"]), inline=False)
-    emb.set_footer(text=f"Since — Today at {since}")
+    since = _fmt_when(s["since_unix"], "f")
+    now   = _fmt_when(time.time(), "t")
+    emb.set_footer(text=f"Since {since} • Today at {now}")
     return emb
 
 # =========================
-# Backfill (optional but recommended)
+# Backfill (optional)
 # =========================
 async def backfill_from_channel(limit: int = 500):
     try:
         ch = client.get_channel(CHANNEL_ID) if CHANNEL_ID else None
-        if not ch:
-            print("[BACKFILL] No channel, skipping")
-            return
+        if not ch: 
+            print("[BACKFILL] No channel, skipping"); return
         count_before = len(EVENTS)
         async for m in ch.history(limit=limit):
-            if not m.embeds:
-                continue
+            if not m.embeds: continue
             for e in m.embeds:
                 evt, payload = parse_polygonx_embed(e)
                 if evt:
-                    # use message timestamp for historical accuracy
                     EVENTS.append({"ts": m.created_at.timestamp(), "type": evt, "data": payload or {}})
         print(f"[BACKFILL] Loaded {len(EVENTS)-count_before} events from history")
     except Exception as e:
@@ -249,17 +289,14 @@ async def backfill_from_channel(limit: int = 500):
 @client.event
 async def on_message(message: discord.Message):
     try:
-        # Ignore our own bot messages
         if message.author == client.user:
             return
-
-        # Parse embeds (webhook posts etc.)
         if message.embeds:
             recognized = 0
             for e in message.embeds:
                 evt, payload = parse_polygonx_embed(e)
                 if evt:
-                    add_event(evt, payload)
+                    add_event(evt, payload, ts=message.created_at.timestamp())
                     recognized += 1
             if recognized:
                 print(f"[INGEST] Parsed {recognized} PolygonX event(s) from message {message.id}")
@@ -267,16 +304,20 @@ async def on_message(message: discord.Message):
         print(f"[ON_MESSAGE ERROR] {e}")
 
 # =========================
-# UI: Summary view (Refresh)
+# Summary view (Refresh + Toggle)
 # =========================
 class SummaryView(View):
+    def __init__(self, mode: str = "catch"):
+        super().__init__(timeout=180)
+        self.mode = mode
+
     @discord.ui.button(label="Refresh", style=discord.ButtonStyle.primary, custom_id="refresh")
     async def refresh(self, interaction: discord.Interaction, button: Button):
         try:
-            await interaction.response.edit_message(embed=build_embed(), view=self)
+            await interaction.response.edit_message(embed=build_embed(mode=self.mode), view=self)
         except discord.InteractionResponded:
             try:
-                await interaction.message.edit(embed=build_embed(), view=self)
+                await interaction.message.edit(embed=build_embed(mode=self.mode), view=self)
             except Exception as e:
                 print(f"[Refresh edit fallback error] {e}")
         except discord.errors.NotFound:
@@ -287,10 +328,20 @@ class SummaryView(View):
         except Exception as e:
             print(f"[Refresh error] {e}")
 
+    @discord.ui.button(label="Rate: Catch", style=discord.ButtonStyle.secondary, custom_id="toggle_rate")
+    async def toggle_rate(self, interaction: discord.Interaction, button: Button):
+        # Toggle tussen catch <-> shiny
+        self.mode = "shiny" if self.mode == "catch" else "catch"
+        button.label = "Rate: Shiny" if self.mode == "shiny" else "Rate: Catch"
+        try:
+            await interaction.response.edit_message(embed=build_embed(mode=self.mode), view=self)
+        except Exception as e:
+            print(f"[Toggle error] {e}")
+
 # =========================
-# /summary command (no defer)
+# /summary command
 # =========================
-@tree.command(name="summary", description="Toon/refresh de 24u stats")
+@tree.command(name="summary", description="Toon de 24u stats (met refresh & rate-toggle)")
 async def summary(inter: discord.Interaction):
     try:
         await inter.response.send_message("📊 Summary wordt geplaatst…", ephemeral=True)
@@ -299,9 +350,8 @@ async def summary(inter: discord.Interaction):
 
     try:
         ch = client.get_channel(CHANNEL_ID) if CHANNEL_ID else inter.channel
-        if ch is None:
-            ch = inter.channel
-        await ch.send(embed=build_embed(), view=SummaryView())
+        if ch is None: ch = inter.channel
+        await ch.send(embed=build_embed(mode="catch"), view=SummaryView(mode="catch"))
     except Exception as e:
         print(f"[Summary error] {e}")
         try:
@@ -310,7 +360,7 @@ async def summary(inter: discord.Interaction):
             pass
 
 # =========================
-# Global app-command error handler
+# Error handler
 # =========================
 @tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -321,10 +371,10 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         else:
             await interaction.followup.send("❌ Er ging iets mis met dit commando.", ephemeral=True)
     except Exception as e:
-        print(f"[COMMAND ERROR FOLLOWUP] {e}")
+        print(f("[COMMAND ERROR FOLLOWUP] {e}"))
 
 # =========================
-# Ready: sync & backfill
+# on_ready
 # =========================
 @client.event
 async def on_ready():
