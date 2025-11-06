@@ -3,9 +3,11 @@ import threading, http.server, socketserver
 
 PORT = 8080
 Handler = http.server.SimpleHTTPRequestHandler
+
 def run_server():
     with socketserver.TCPServer(("", PORT), Handler) as httpd:
         httpd.serve_forever()
+
 threading.Thread(target=run_server, daemon=True).start()
 # --- end keep-alive ---
 
@@ -15,18 +17,22 @@ import discord
 from discord import app_commands
 from discord.ui import View, Button
 
+# 🔹 Laad tokens vanuit Render environment
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
-
 DATA_FILE = "stats.json"
 
-
+# --- Helpers ---
 def load_data():
     return json.load(open(DATA_FILE, "r", encoding="utf-8")) if os.path.exists(DATA_FILE) else {"events":[]}
+
 def save_data(d):
     json.dump(d, open(DATA_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 
+# ✅ Belangrijk: intents toestaan om berichten te lezen
 intents = discord.Intents.default()
+intents.message_content = True
+
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
@@ -35,6 +41,7 @@ def last24(): return now()-timedelta(hours=24), now()
 def link(gid,cid,mid): return f"https://discord.com/channels/{gid}/{cid}/{mid}"
 def fmd(dt): return dt.strftime("%m/%d/%y %H:%M")
 
+# --- Data & Embed functies ---
 def gather():
     s,e = last24(); S,E = s.timestamp(), e.timestamp()
     ev = [x for x in load_data()["events"] if S<=x["ts"]<=E]
@@ -77,6 +84,7 @@ def build_embed():
     em.set_footer(text=f"Since {since} • Today at {until}")
     return em
 
+# --- Discord Commands ---
 class SummaryView(View):
     @discord.ui.button(label="Refresh", style=discord.ButtonStyle.primary, custom_id="refresh")
     async def refresh(self, interaction: discord.Interaction, button: Button):
@@ -109,9 +117,44 @@ async def summary(inter: discord.Interaction):
     await ch.send(embed=build_embed(), view=SummaryView())
     await inter.followup.send("📊 Summary geplaatst.", ephemeral=True)
 
+# --- Events ---
 @client.event
 async def on_ready():
     await tree.sync()
     print(f"✅ Logged in as {client.user} | Slash commands gesynchroniseerd.")
 
+@client.event
+async def on_message(msg):
+    # Enkel reageren op berichten van de PolygonX webhook
+    if msg.author.bot and "caught Pokémon" in msg.content.lower():
+        name = "Unknown"
+        iv = None
+        shiny = "✨" in msg.content or "shiny" in msg.content.lower()
+
+        # probeer naam & IV te ontleden
+        try:
+            parts = msg.content.split("caught Pokémon: ")[1]
+            name = parts.split("•")[0].strip()
+            if "IV" in msg.content:
+                iv_part = msg.content.split("IV")[1].split("%")[0]
+                iv = float(iv_part.strip()) / 100
+        except Exception as e:
+            print("⚠️ Kon bericht niet parsen:", e)
+
+        # opslaan in stats.json
+        d = load_data()
+        d["events"].append({
+            "type": "Catch",
+            "name": name,
+            "iv": iv,
+            "is_shiny": shiny,
+            "ts": time.time(),
+            "gid": msg.guild.id if msg.guild else 0,
+            "cid": msg.channel.id,
+            "mid": msg.id
+        })
+        save_data(d)
+        print(f"✅ Auto-logged catch: {name} ({iv*100 if iv else '?'}%) {'✨' if shiny else ''}")
+
+# --- Start de bot ---
 client.run(TOKEN)
