@@ -100,27 +100,32 @@ def build_embed():
     em.set_footer(text=f"Since {since} • Today at {until}")
     return em
 
-# -------- Commands --------
 class SummaryView(View):
     @discord.ui.button(label="Refresh", style=discord.ButtonStyle.primary, custom_id="refresh")
     async def refresh(self, interaction: discord.Interaction, button: Button):
-        # direct bijwerken; geen defer → voorkomt double/unknown interaction
         try:
             await interaction.response.edit_message(embed=build_embed(), view=self)
         except discord.InteractionResponded:
             await interaction.message.edit(embed=build_embed(), view=self)
+        except discord.errors.NotFound:
+            # Interaction verlopen of bericht verwijderd
+            await interaction.followup.send("⏳ Interaction verlopen, gebruik /summary opnieuw.", ephemeral=True)
+        except Exception as e:
+            print(f"[Refresh error] {e}")
 
 @tree.command(name="summary", description="Toon/refresh de 24u stats")
 async def summary(inter: discord.Interaction):
-    # 1) meteen ephemeraal bevestigen (ipv defer)
     try:
         await inter.response.send_message("📊 Summary wordt geplaatst…", ephemeral=True)
     except discord.InteractionResponded:
-        pass  # al bevestigd? prima
+        pass  # al bevestigd, negeren
 
-    # 2) de echte summary in het kanaal plaatsen
-    ch = client.get_channel(CHANNEL_ID) if CHANNEL_ID else inter.channel
-    await ch.send(embed=build_embed(), view=SummaryView())
+    try:
+        ch = client.get_channel(CHANNEL_ID) if CHANNEL_ID else inter.channel
+        await ch.send(embed=build_embed(), view=SummaryView())
+    except Exception as e:
+        print(f"[Summary error] {e}")
+
 
 # -------- Events --------
 @client.event
