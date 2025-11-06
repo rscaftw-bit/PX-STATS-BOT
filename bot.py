@@ -1,4 +1,23 @@
-import os, time, json
+# --- keep Render alive ---
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import os
+
+class KeepAliveHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'PXstats bot is running!')
+
+def run_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), KeepAliveHandler)
+    server.serve_forever()
+
+threading.Thread(target=run_server, daemon=True).start()
+# --- end keep-alive ---
+
+import time, json
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 import discord
