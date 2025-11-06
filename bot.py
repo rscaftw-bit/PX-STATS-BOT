@@ -26,7 +26,7 @@ client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
 # =========================
-# Simple keep-alive HTTP server (no extra deps)
+# Simple keep-alive HTTP server (for Render)
 # =========================
 class _HealthzHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -37,7 +37,6 @@ class _HealthzHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
     def log_message(self, *args, **kwargs):
-        # keep logs clean on Render
         return
 
 def start_keepalive():
@@ -67,12 +66,35 @@ def last_24h():
 # PolygonX embed parser
 # =========================
 RC_PAT = re.compile(r"(rare\s*candy|rc)\s*[:xX]?\s*(\d+)", re.I)
+PKM_LINE_PAT = re.compile(r"^Pokemon:\s*([A-Za-zÀ-ÿ' .-]+)", re.I | re.M)  # vang bv. "Pokemon: Cottonee"
 
 def _field_value(emb: discord.Embed, wanted_name: str):
     for f in emb.fields:
         if (f.name or "").strip().lower() == wanted_name.lower():
             return (f.value or "").strip()
     return None
+
+def _extract_pokemon_name(e: discord.Embed):
+    # 1) Field "Pokemon"
+    val = _field_value(e, "Pokemon")
+    if val:
+        name = val.split("(")[0].strip()
+        if name:
+            return name
+
+    # 2) Description: "Pokemon: NAME"
+    if e.description:
+        m = PKM_LINE_PAT.search(e.description)
+        if m:
+            return m.group(1).strip()
+
+    # 3) Title fallback: "Pokemon caught successfully!" / others -> nothing there, but try in parentheses
+    title = (e.title or "")
+    m2 = re.search(r"([A-Za-zÀ-ÿ' .-]+)\s*\(", title)
+    if m2:
+        return m2.group(1).strip()
+
+    return "?"
 
 def parse_polygonx_embed(e: discord.Embed):
     """
@@ -81,41 +103,29 @@ def parse_polygonx_embed(e: discord.Embed):
     title = (e.title or "").strip()
     t = title.lower()
 
-    # ---- Catch success ----
-    if "pokemon caught successfully" in t:
-        name = _field_value(e, "Pokemon")
-        if name:
-            name = name.split("(")[0].strip()
-        return ("Catch", {"name": name})
-
-    # ---- Shiny (title contains 'shiny') ----
+    # ---- Shiny (behandel eerst; sommige titels bevatten ook 'caught') ----
     if "shiny" in t:
-        name = _field_value(e, "Pokemon")
-        if name:
-            name = name.split("(")[0].strip()
-        return ("Shiny", {"name": name})
+        return ("Shiny", {"name": _extract_pokemon_name(e)})
+
+    # ---- Catch success ----
+    if "pokemon caught successfully" in t or "caught successfully" in t:
+        return ("Catch", {"name": _extract_pokemon_name(e)})
 
     # ---- Incense Encounter ----
-    if "incense encounter" in t:
-        name = _field_value(e, "Pokemon")
-        if name:
-            name = name.split("(")[0].strip()
-        return ("Encounter", {"name": name})
+    if "incense encounter" in t or "encounter" in t:
+        # voorkom dat 'rocket encounter' per ongeluk telt
+        if "rocket" not in t:
+            return ("Encounter", {"name": _extract_pokemon_name(e)})
 
-    # ---- Raids / Rockets / Hatches / Rewards (broad matches) ----
+    # ---- Raids / Rockets / Hatches / Rewards ----
     if "raid" in t:
         return ("Raid", {"title": title})
     if "rocket" in t:
         return ("Rocket", {"title": title})
     if "hatch" in t:
-        # probeer pokémonnaam uit fields te halen
-        name = _field_value(e, "Pokemon")
-        if name:
-            name = name.split("(")[0].strip()
-        return ("Hatch", {"name": name or title})
+        return ("Hatch", {"name": _extract_pokemon_name(e) or title})
     if "reward" in t or "rewards" in t or "loot" in t:
         rare_candy = 0
-        # probeer rare candy uit fields/description
         texts = [e.description or ""]
         for f in e.fields:
             texts.append(f"{f.name}\n{f.value}")
@@ -125,7 +135,6 @@ def parse_polygonx_embed(e: discord.Embed):
             rare_candy = int(m.group(2))
         return ("Reward", {"title": title, "rare_candy": rare_candy})
 
-    # Not recognized
     return (None, None)
 
 # =========================
@@ -205,11 +214,10 @@ def build_embed():
         inline=False
     )
 
+    since = time.strftime('%d/%m/%y %H:%M', time.localtime(s["since_unix"]))
     emb.add_field(name="⚪ Latest Catches", value=fmt_latest(s["latest_catches"]), inline=False)
     emb.add_field(name="✨ Latest Shinies", value=fmt_latest(s["latest_shinies"]), inline=False)
     emb.add_field(name="🎁 Recent Rewards", value=fmt_latest(s["latest_rewards"]), inline=False)
-
-    since = time.strftime('%d/%m/%y %H:%M', time.localtime(s["since_unix"]))
     emb.set_footer(text=f"Since — Today at {since}")
     return emb
 
@@ -244,10 +252,8 @@ async def on_message(message: discord.Message):
         # Ignore our own bot messages
         if message.author == client.user:
             return
-        if message.author.bot and message.author != client.user:
-            # webhooks may have bot=True; don't auto-return, we still parse embeds
-            pass
 
+        # Parse embeds (webhook posts etc.)
         if message.embeds:
             recognized = 0
             for e in message.embeds:
@@ -259,9 +265,6 @@ async def on_message(message: discord.Message):
                 print(f"[INGEST] Parsed {recognized} PolygonX event(s) from message {message.id}")
     except Exception as e:
         print(f"[ON_MESSAGE ERROR] {e}")
-
-    # keep slash-commands working alongside on_message
-    await client.process_commands(message)
 
 # =========================
 # UI: Summary view (Refresh)
@@ -335,7 +338,6 @@ async def on_ready():
     except Exception as e:
         print(f"[SYNC ERROR] {e}")
 
-    # Backfill om na redeploy niet 0 te tonen
     await backfill_from_channel(limit=500)
     print(f"[READY] Logged in as {client.user} (id: {client.user.id})")
 
