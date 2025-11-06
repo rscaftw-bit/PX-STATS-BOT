@@ -6,6 +6,7 @@ import threading
 import unicodedata
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from collections import deque
+from typing import Optional
 
 import discord
 from discord import app_commands
@@ -19,7 +20,7 @@ CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0")) or None
 GUILD_ID = int(os.getenv("GUILD_ID", "0")) or None
 
 intents = discord.Intents.default()
-intents.message_content = True
+intents.message_content = True     # nodig om webhook-embeds te lezen
 intents.members = True
 intents.guilds = True
 
@@ -45,12 +46,12 @@ def start_keepalive():
 # =========================
 # In-memory event storage
 # =========================
-EVENTS = deque(maxlen=10000)
+EVENTS = deque(maxlen=10000)  # ringbuffer
 
-def add_event(evt_type: str, payload: dict, ts: float | None = None):
+def add_event(evt_type: str, payload: dict, ts: Optional[float] = None):
     EVENTS.append({
-        "ts": ts if ts is not None else time.time(),
-        "type": evt_type,
+        "ts": ts if ts is not None else time.time(),  # epoch UTC
+        "type": evt_type,                              # "Catch", "Shiny", "Encounter", ...
         "data": payload or {}
     })
 
@@ -61,9 +62,9 @@ def last_24h():
 # =========================
 # Parser helpers
 # =========================
-RC_PAT = re.compile(r"(rare\s*candy|rc)\s*[:xX]?\s*(\d+)", re.I)
-IV_PAT = re.compile(r"IV\s*:\s*(\d{1,2})/(\d{1,2})/(\d{1,2})", re.I)
-PKM_LINE_PAT = re.compile(r"^\s*Pok[eé]mon:\s*([A-Za-zÀ-ÿ' .-]+|p\d+)", re.I | re.M)
+RC_PAT        = re.compile(r"(rare\s*candy|rc)\s*[:xX]?\s*(\d+)", re.I)
+IV_PAT        = re.compile(r"IV\s*:\s*(\d{1,2})/(\d{1,2})/(\d{1,2})", re.I)
+PKM_LINE_PAT  = re.compile(r"^\s*Pok[eé]mon:\s*([A-Za-zÀ-ÿ' .-]+|p\d+)", re.I | re.M)
 
 def _norm(s: str) -> str:
     return unicodedata.normalize("NFKD", s or "").encode("ascii","ignore").decode().lower().strip()
@@ -72,37 +73,39 @@ def _field_value(emb: discord.Embed, wanted_name: str):
     wn = _norm(wanted_name)
     for f in emb.fields:
         fname = _norm(f.name or "")
-        if fname == wn or "pokemon" in fname:
+        if fname == wn or "pokemon" in fname:  # accepteer "Pokemon" / "Pokémon" / varianten
             return (f.value or "").strip()
     return None
 
 def _extract_pokemon_name(e: discord.Embed):
-    # 1) Field
+    # 1) Field "Pokemon"/"Pokémon"
     val = _field_value(e, "Pokemon")
     if val:
         name = val.split("(")[0].strip()
-        if name: return name
-    # 2) Description
+        if name:
+            return name
+    # 2) Description-regel
     if e.description:
         m = PKM_LINE_PAT.search(e.description)
-        if m: return m.group(1).strip()
-    # 3) Title fallback
+        if m:
+            return m.group(1).strip()
+    # 3) Title fallback (pak token vóór "(" als die er is)
     title = (e.title or "")
     m2 = re.search(r"([A-Za-zÀ-ÿ' .-]+|p\d+)\s*\(", title)
-    if m2: return m2.group(1).strip()
+    if m2:
+        return m2.group(1).strip()
     return "?"
 
-def _extract_iv_pct(e: discord.Embed) -> int | None:
-    # Zoek IV-lijn in fields/description
+def _extract_iv_pct(e: discord.Embed) -> Optional[int]:
     texts = [e.description or ""]
     for f in e.fields:
         texts.append(f"{f.name}\n{f.value}")
     blob = "\n".join(texts)
     m = IV_PAT.search(blob)
-    if not m: return None
+    if not m:
+        return None
     atk, de, st = map(int, m.groups())
-    pct = round((atk + de + st) / 45 * 100)
-    return pct
+    return round((atk + de + st) / 45 * 100)
 
 # =========================
 # PolygonX embed parser
@@ -119,11 +122,11 @@ def parse_polygonx_embed(e: discord.Embed):
     if "pokemon caught successfully" in t or "caught successfully" in t:
         return ("Catch", {"name": _extract_pokemon_name(e), "iv_pct": _extract_iv_pct(e)})
 
-    # Fled (als PolygonX dat post)
+    # Fled
     if "fled" in t or "ran away" in t or "ran-away" in t:
         return ("Fled", {"name": _extract_pokemon_name(e)})
 
-    # Encounters (we tellen bewust alle encounters – ook voor runaways analyse)
+    # Encounters: we tellen bewust ALLE encounters (voor runaways/catch-rate)
     if "encounter" in t and "rocket" not in t:
         payload = {"name": _extract_pokemon_name(e)}
         if "incense" in t: payload["incense"] = True
@@ -137,8 +140,7 @@ def parse_polygonx_embed(e: discord.Embed):
     if "quest" in t:       return ("Quest", {"title": title})
     if "rocket" in t:      return ("Rocket", {"title": title})
     if "raid" in t:        return ("Raid", {"title": title})
-    if "hatch" in t:
-        return ("Hatch", {"name": _extract_pokemon_name(e) or title})
+    if "hatch" in t:       return ("Hatch", {"name": _extract_pokemon_name(e) or title})
     if "reward" in t or "rewards" in t or "loot" in t:
         rare_candy = 0
         texts = [e.description or ""]
@@ -159,8 +161,8 @@ def build_stats():
     for r in rows:
         by_type[r["type"]] = by_type.get(r["type"], 0) + 1
 
-    # Speciale subcounters uit Encounter-payload
-    lure = sum(1 for r in rows if r["type"] == "Encounter" and r["data"].get("lure"))
+    # Subcounters uit Encounter payload
+    lure    = sum(1 for r in rows if r["type"] == "Encounter" and r["data"].get("lure"))
     incense = sum(1 for r in rows if r["type"] == "Encounter" and r["data"].get("incense"))
 
     s = {
@@ -190,12 +192,12 @@ def build_stats():
             try: s["rare_candy"] += int(rc)
             except: pass
 
-    # afgeleide metrics
-    s["runaways"]  = max(0, s["encounters"] - s["catches"])
+    # Afgeleide metrics
+    s["runaways"]   = max(0, s["encounters"] - s["catches"])
     s["catch_rate"] = (s["catches"] / s["encounters"] * 100.0) if s["encounters"] > 0 else 0.0
-    s["shiny_rate"] = (s["shinies"] / s["catches"] * 100.0) if s["catches"] > 0 else 0.0
+    s["shiny_rate"] = (s["shinies"] / s["catches"] * 100.0)    if s["catches"]    > 0 else 0.0
 
-    # laatste 5
+    # Laatste X
     s["latest_catches"] = [r for r in rows if r["type"] == "Catch"][-5:]
     s["latest_shinies"] = [r for r in rows if r["type"] == "Shiny"][-5:]
     s["latest_rewards"] = [r for r in rows if r["type"] == "Reward"][-3:]
@@ -215,10 +217,10 @@ def build_embed(mode: str = "catch"):
     def fmt_latest(items, with_iv=True):
         if not items: return "—"
         lines = []
-        for it in items[::-1]:  # recentste bovenaan
+        for it in items[::-1]:  # recentste eerst
             name = it["data"].get("name") or it["data"].get("title") or "?"
-            ivp = it["data"].get("iv_pct")
-            ts = it["ts"]
+            ivp  = it["data"].get("iv_pct")
+            ts   = it["ts"]
             if with_iv and ivp is not None:
                 lines.append(f"{name} **{ivp}%** ({_fmt_when(ts, 'f')})")
             else:
@@ -227,12 +229,12 @@ def build_embed(mode: str = "catch"):
 
     emb = discord.Embed(title="📊 Today’s Stats (Last 24h)", color=discord.Color.blurple())
 
-    # Top rij zoals in je screenshot (inline)
+    # Bovenste rij (inline)
     emb.add_field(name="Encounters", value=str(s["encounters"]), inline=True)
-    emb.add_field(name="Catches",   value=str(s["catches"]), inline=True)
-    emb.add_field(name="Shinies",   value=str(s["shinies"]), inline=True)
+    emb.add_field(name="Catches",   value=str(s["catches"]),   inline=True)
+    emb.add_field(name="Shinies",   value=str(s["shinies"]),   inline=True)
 
-    # Event breakdown
+    # Breakdown
     breakdown = (
         f"Encounter: {s['encounters']}\n"
         f"Lure: {s['lure']}\n"
@@ -246,7 +248,7 @@ def build_embed(mode: str = "catch"):
     )
     emb.add_field(name="**Event breakdown**", value=breakdown, inline=False)
 
-    # Rate-blok + rare candy + runaways
+    # Rates + RC + Runaways (inline)
     if mode == "catch":
         emb.add_field(name="🎯 Catch rate", value=f"{s['catch_rate']:.1f}%", inline=True)
     else:
@@ -254,7 +256,7 @@ def build_embed(mode: str = "catch"):
     emb.add_field(name="🏃 Runaways (est.)", value=str(s["runaways"]), inline=True)
     emb.add_field(name="🍬 Rare Candy earned", value=str(s["rare_candy"]), inline=True)
 
-    # Latest lists
+    # Latest
     emb.add_field(name="🕓 Latest Catches", value=fmt_latest(s["latest_catches"], with_iv=True), inline=False)
     emb.add_field(name="✨ Latest Shinies", value=fmt_latest(s["latest_shinies"], with_iv=True), inline=False)
     emb.add_field(name="🎁 Recent Rewards", value=fmt_latest(s["latest_rewards"], with_iv=False), inline=False)
@@ -265,16 +267,18 @@ def build_embed(mode: str = "catch"):
     return emb
 
 # =========================
-# Backfill (optional)
+# Backfill (na restart)
 # =========================
 async def backfill_from_channel(limit: int = 500):
     try:
         ch = client.get_channel(CHANNEL_ID) if CHANNEL_ID else None
-        if not ch: 
-            print("[BACKFILL] No channel, skipping"); return
+        if not ch:
+            print("[BACKFILL] No channel, skipping")
+            return
         count_before = len(EVENTS)
         async for m in ch.history(limit=limit):
-            if not m.embeds: continue
+            if not m.embeds:
+                continue
             for e in m.embeds:
                 evt, payload = parse_polygonx_embed(e)
                 if evt:
@@ -304,7 +308,7 @@ async def on_message(message: discord.Message):
         print(f"[ON_MESSAGE ERROR] {e}")
 
 # =========================
-# Summary view (Refresh + Toggle)
+# Summary view (Refresh + Rate-toggle)
 # =========================
 class SummaryView(View):
     def __init__(self, mode: str = "catch"):
@@ -330,7 +334,6 @@ class SummaryView(View):
 
     @discord.ui.button(label="Rate: Catch", style=discord.ButtonStyle.secondary, custom_id="toggle_rate")
     async def toggle_rate(self, interaction: discord.Interaction, button: Button):
-        # Toggle tussen catch <-> shiny
         self.mode = "shiny" if self.mode == "catch" else "catch"
         button.label = "Rate: Shiny" if self.mode == "shiny" else "Rate: Catch"
         try:
@@ -339,7 +342,7 @@ class SummaryView(View):
             print(f"[Toggle error] {e}")
 
 # =========================
-# /summary command
+# /summary command (no defer)
 # =========================
 @tree.command(name="summary", description="Toon de 24u stats (met refresh & rate-toggle)")
 async def summary(inter: discord.Interaction):
@@ -371,10 +374,10 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         else:
             await interaction.followup.send("❌ Er ging iets mis met dit commando.", ephemeral=True)
     except Exception as e:
-        print(f("[COMMAND ERROR FOLLOWUP] {e}"))
+        print(f"[COMMAND ERROR FOLLOWUP] {e}")
 
 # =========================
-# on_ready
+# on_ready (sync + presence + backfill)
 # =========================
 @client.event
 async def on_ready():
@@ -387,6 +390,16 @@ async def on_ready():
             print("[SYNC] Commands globaal gesynct")
     except Exception as e:
         print(f"[SYNC ERROR] {e}")
+
+    # Zet expliciet online + activiteit (lost "Offline — 1" visueel op)
+    try:
+        await client.change_presence(
+            status=discord.Status.online,
+            activity=discord.Game(name="PXstats · /summary")
+        )
+        print("[PRESENCE] Set to online with activity")
+    except Exception as e:
+        print(f"[PRESENCE ERROR] {e}")
 
     await backfill_from_channel(limit=500)
     print(f"[READY] Logged in as {client.user} (id: {client.user.id})")
