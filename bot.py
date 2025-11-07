@@ -132,7 +132,7 @@ def parse_polygonx_embed(e: discord.Embed):
     if "quest" in full:
         return ("Quest", {"name": _extract_pokemon_name(e)})
 
-    # --- Generieke Encounter (bronlabel: wild/lure/incense) ---
+    # --- Generieke Encounter (bronlabel wild/lure/incense) ---
     if "encounter" in full and "rocket" not in full:
         src = "wild"
         if "incense" in full: src = "incense"
@@ -176,35 +176,43 @@ def build_stats():
     enc_lure    = sum(1 for r in rows if r["type"] == "Encounter" and r["data"].get("source") == "lure")
     enc_incense = sum(1 for r in rows if r["type"] == "Encounter" and r["data"].get("source") == "incense")
 
-    # MaxBattle/Raid/Quest/Rocket tellen als encounters in de som (maar hebben eigen type)
     enc_maxbattle = by_type.get("MaxBattle", 0)
     enc_raid      = by_type.get("Raid", 0)
     enc_quest     = by_type.get("Quest", 0)
     enc_rocket    = by_type.get("Rocket", 0)
+    enc_hatch     = by_type.get("Hatch", 0)  # alleen tonen, niet in rate
 
     # 100% IV counter (op catches)
     perfect_100 = sum(1 for r in rows if r["type"] == "Catch" and r["data"].get("iv_pct") == 100)
 
-    # Totale encounters voor rate (Hatch telt NIET mee)
-    enc_total_for_rate = enc_wild + enc_lure + enc_incense + enc_maxbattle + enc_quest + enc_rocket + enc_raid
+    # Totale encounters uit expliciete bronnen (Hatch telt NIET mee)
+    enc_total_sources = enc_wild + enc_lure + enc_incense + enc_maxbattle + enc_quest + enc_rocket + enc_raid
+
+    # Sommige catches hebben geen aparte 'Encounter' webhook → rate-basis mag catches niet onderschrijden
+    rate_base = max(enc_total_sources, by_type.get("Catch", 0))
 
     s = {
-        "encounters_wild": enc_wild,
-        "encounters_total_for_rate": enc_total_for_rate,
+        # Bovenaan tonen we deze als "Encounters"
+        "encounters_total_for_rate": rate_base,
 
+        # Breakdown
+        "encounters_wild": enc_wild,
         "lure": enc_lure,
         "incense": enc_incense,
         "max_battle": enc_maxbattle,
         "quest": enc_quest,
         "rockets": enc_rocket,
         "raids": enc_raid,
-        "hatches": by_type.get("Hatch", 0),
+        "hatches": enc_hatch,
 
+        # Hoofdstatistieken
         "catches": by_type.get("Catch", 0),
         "shinies": by_type.get("Shiny", 0),
 
+        # Extras
         "perfect_100": perfect_100,
 
+        # Lists & meta
         "latest_catches": [r for r in rows if r["type"] == "Catch"][-5:],
         "latest_shinies": [r for r in rows if r["type"] == "Shiny"][-5:],
         "since_unix": min((r["ts"] for r in rows), default=time.time()),
@@ -254,14 +262,14 @@ def build_embed(mode: str = "catch"):
 
     emb = discord.Embed(title="📊 Today’s Stats (Last 24h)", color=discord.Color.blurple())
 
-    # Bovenste rij (inline): toon wild encounters als "Encounters"
-    emb.add_field(name="Encounters", value=str(s["encounters_wild"]), inline=True)
-    emb.add_field(name="Catches",   value=str(s["catches"]),         inline=True)
-    emb.add_field(name="Shinies",   value=str(s["shinies"]),         inline=True)
+    # Bovenste rij (Encounters = rate-basis)
+    emb.add_field(name="Encounters", value=str(s["encounters_total_for_rate"]), inline=True)
+    emb.add_field(name="Catches",   value=str(s["catches"]),                  inline=True)
+    emb.add_field(name="Shinies",   value=str(s["shinies"]),                  inline=True)
 
-    # Breakdown (som van bronnen – Hatch getoond maar niet in rate)
+    # Breakdown (Wild apart; Hatch niet in rate)
     breakdown = (
-        f"Encounter: {s['encounters_wild']}\n"
+        f"Wild: {s['encounters_wild']}\n"
         f"Lure: {s['lure']}\n"
         f"Incense: {s['incense']}\n"
         f"Max Battle: {s['max_battle']}\n"
@@ -308,11 +316,11 @@ async def backfill_from_channel(limit: int = 500):
                     ts = m.created_at.timestamp()
                     title_l = (e.title or "").lower()
 
-                    # Shiny die ook catch is (als titel dat zegt)
+                    # Shiny die ook catch is (indien titel dat zegt)
                     if evt == "Shiny" and ("caught" in title_l or "caught successfully" in title_l):
                         add_event("Catch", payload, ts=ts)
 
-                    # Quest/Raid/MaxBattle tellen ook als Encounter (met bronlabel)
+                    # Quest/Raid/MaxBattle → óók Encounter met bronlabel
                     if evt == "Quest":
                         add_event("Encounter", {"name": payload.get("name"), "source": "quest"}, ts=ts)
                     if evt == "Raid":
@@ -345,7 +353,7 @@ async def on_message(message: discord.Message):
                     if evt == "Shiny" and ("caught" in title_l or "caught successfully" in title_l):
                         add_event("Catch", payload, ts=ts); recognized += 1
 
-                    # Quest/Raid/MaxBattle → ook een Encounter met bronlabel
+                    # Quest/Raid/MaxBattle → óók Encounter met bronlabel
                     if evt == "Quest":
                         add_event("Encounter", {"name": payload.get("name"), "source": "quest"}, ts=ts); recognized += 1
                     if evt == "Raid":
