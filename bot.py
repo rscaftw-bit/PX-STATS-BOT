@@ -110,12 +110,19 @@ def _extract_iv_pct(e: discord.Embed) -> Optional[int]:
 # =========================
 # PolygonX embed parser
 # =========================
+def _gather_text(e: discord.Embed) -> str:
+    parts = [e.title or "", e.description or ""]
+    for f in e.fields:
+        parts.append(f"{f.name}\n{f.value}")
+    return "\n".join(parts).lower()
+
 def parse_polygonx_embed(e: discord.Embed):
     title = (e.title or "").strip()
     t = title.lower()
+    fulltext = _gather_text(e)
 
-    # Shiny
-    if "shiny" in t:
+    # Shiny (kan in titel, description of fields staan)
+    if any(x in fulltext for x in ["shiny", "✨", ":sparkles:"]):
         return ("Shiny", {"name": _extract_pokemon_name(e), "iv_pct": _extract_iv_pct(e)})
 
     # Catch
@@ -184,6 +191,7 @@ def build_stats():
         "latest_shinies": [],
         "latest_rewards": [],
         "since_unix": min((r["ts"] for r in rows), default=time.time()),
+        "rows": rows,  # meegeven voor cross-matching (shiny ↔ catch)
     }
 
     for r in rows:
@@ -214,17 +222,37 @@ def build_embed(mode: str = "catch"):
     """
     s = build_stats()
 
-    def fmt_latest(items, with_iv=True):
+    # Voor ✨ in Latest Catches: maak snelle index van shiny-events per naam
+    shiny_by_name = {}
+    for ev in s["rows"]:
+        if ev["type"] == "Shiny":
+            nm = (ev["data"].get("name") or "").lower()
+            shiny_by_name.setdefault(nm, []).append(ev["ts"])
+
+    def is_catch_shiny(name: str, ts: float) -> bool:
+        # Catch is shiny als er binnen ±180s een Shiny-event met dezelfde naam is
+        key = (name or "").lower()
+        if key not in shiny_by_name:
+            return False
+        for t2 in shiny_by_name[key]:
+            if abs(t2 - ts) <= 180:
+                return True
+        return False
+
+    def fmt_latest(items, with_iv=True, mark_shiny_in_catches=False):
         if not items: return "—"
         lines = []
         for it in items[::-1]:  # recentste eerst
             name = it["data"].get("name") or it["data"].get("title") or "?"
             ivp  = it["data"].get("iv_pct")
             ts   = it["ts"]
+            shiny_prefix = ""
+            if mark_shiny_in_catches and is_catch_shiny(name, ts):
+                shiny_prefix = "✨ "
             if with_iv and ivp is not None:
-                lines.append(f"{name} **{ivp}%** ({_fmt_when(ts, 'f')})")
+                lines.append(f"{shiny_prefix}{name} **{ivp}%** ({_fmt_when(ts, 'f')})")
             else:
-                lines.append(f"{name} ({_fmt_when(ts, 'f')})")
+                lines.append(f"{shiny_prefix}{name} ({_fmt_when(ts, 'f')})")
         return "\n".join(lines[:5])
 
     emb = discord.Embed(title="📊 Today’s Stats (Last 24h)", color=discord.Color.blurple())
@@ -257,9 +285,21 @@ def build_embed(mode: str = "catch"):
     emb.add_field(name="🍬 Rare Candy earned", value=str(s["rare_candy"]), inline=True)
 
     # Latest
-    emb.add_field(name="🕓 Latest Catches", value=fmt_latest(s["latest_catches"], with_iv=True), inline=False)
-    emb.add_field(name="✨ Latest Shinies", value=fmt_latest(s["latest_shinies"], with_iv=True), inline=False)
-    emb.add_field(name="🎁 Recent Rewards", value=fmt_latest(s["latest_rewards"], with_iv=False), inline=False)
+    emb.add_field(
+        name="🕓 Latest Catches",
+        value=fmt_latest(s["latest_catches"], with_iv=True, mark_shiny_in_catches=True),
+        inline=False
+    )
+    emb.add_field(
+        name="✨ Latest Shinies",
+        value=fmt_latest(s["latest_shinies"], with_iv=True, mark_shiny_in_catches=False),
+        inline=False
+    )
+    emb.add_field(
+        name="🎁 Recent Rewards",
+        value=fmt_latest(s["latest_rewards"], with_iv=False, mark_shiny_in_catches=False),
+        inline=False
+    )
 
     since = _fmt_when(s["since_unix"], "f")
     now   = _fmt_when(time.time(), "t")
@@ -282,7 +322,12 @@ async def backfill_from_channel(limit: int = 500):
             for e in m.embeds:
                 evt, payload = parse_polygonx_embed(e)
                 if evt:
-                    EVENTS.append({"ts": m.created_at.timestamp(), "type": evt, "data": payload or {}})
+                    # Voeg shiny toe aan beide tellers als het een shiny catch is
+                    title_l = (e.title or "").lower()
+                    ts = m.created_at.timestamp()
+                    if evt == "Shiny" and ("caught" in title_l or "caught successfully" in title_l):
+                        add_event("Catch", payload, ts=ts)
+                    add_event(evt, payload, ts=ts)
         print(f"[BACKFILL] Loaded {len(EVENTS)-count_before} events from history")
     except Exception as e:
         print(f"[BACKFILL ERROR] {e}")
@@ -300,7 +345,13 @@ async def on_message(message: discord.Message):
             for e in message.embeds:
                 evt, payload = parse_polygonx_embed(e)
                 if evt:
-                    add_event(evt, payload, ts=message.created_at.timestamp())
+                    ts = message.created_at.timestamp()
+                    # Shiny die ook duidelijk een 'caught'-titel heeft → tel ook als Catch
+                    title_l = (e.title or "").lower()
+                    if evt == "Shiny" and ("caught" in title_l or "caught successfully" in title_l):
+                        add_event("Catch", payload, ts=ts)
+                        recognized += 1
+                    add_event(evt, payload, ts=ts)
                     recognized += 1
             if recognized:
                 print(f"[INGEST] Parsed {recognized} PolygonX event(s) from message {message.id}")
@@ -391,7 +442,7 @@ async def on_ready():
     except Exception as e:
         print(f"[SYNC ERROR] {e}")
 
-    # Zet expliciet online + activiteit (lost "Offline — 1" visueel op)
+    # Zet expliciet online + activiteit
     try:
         await client.change_presence(
             status=discord.Status.online,
