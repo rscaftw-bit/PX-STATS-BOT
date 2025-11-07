@@ -62,7 +62,6 @@ def last_24h():
 # =========================
 # Parser helpers
 # =========================
-RC_PAT        = re.compile(r"(rare\s*candy|rc)\s*[:xX]?\s*(\d+)", re.I)
 IV_PAT        = re.compile(r"IV\s*:\s*(\d{1,2})/(\d{1,2})/(\d{1,2})", re.I)
 PKM_LINE_PAT  = re.compile(r"^\s*Pok[eé]mon:\s*([A-Za-zÀ-ÿ' .-]+|p\d+)", re.I | re.M)
 
@@ -162,12 +161,6 @@ def parse_polygonx_embed(e: discord.Embed):
         return ("Lure", {"title": title})
     if "incense" in full:
         return ("Incense", {"title": title})
-    if "reward" in full or "rewards" in full or "loot" in full:
-        rare_candy = 0
-        m = RC_PAT.search(full)
-        if m:
-            rare_candy = int(m.group(2))
-        return ("Reward", {"title": title, "rare_candy": rare_candy})
 
     # geen match → val terug op generieke Encounter (als gedetecteerd)
     return encounter_guess
@@ -185,6 +178,9 @@ def build_stats():
     lure    = sum(1 for r in rows if r["type"] == "Encounter" and r["data"].get("lure"))
     incense = sum(1 for r in rows if r["type"] == "Encounter" and r["data"].get("incense"))
 
+    # 100% IV counter (alleen op Catch-events met iv_pct==100)
+    perfect_100 = sum(1 for r in rows if r["type"] == "Catch" and r["data"].get("iv_pct") == 100)
+
     s = {
         "encounters": by_type.get("Encounter", 0),
         "catches":    by_type.get("Catch", 0),
@@ -193,25 +189,18 @@ def build_stats():
         "rockets":    by_type.get("Rocket", 0),
         "hatches":    by_type.get("Hatch", 0),
         "quests":     by_type.get("Quest", 0),
-        "rewards":    by_type.get("Reward", 0),
         "max_battle": by_type.get("MaxBattle", 0),
         "lure":       lure or by_type.get("Lure", 0),
         "incense":    incense or by_type.get("Incense", 0),
         "fled":       by_type.get("Fled", 0),
 
-        "rare_candy": 0,
+        "perfect_100": perfect_100,
+
         "latest_catches": [],
         "latest_shinies": [],
-        "latest_rewards": [],
         "since_unix": min((r["ts"] for r in rows), default=time.time()),
         "rows": rows,  # voor cross-match (shiny ↔ catch)
     }
-
-    for r in rows:
-        if r["type"] == "Reward":
-            rc = r["data"].get("rare_candy", 0) or r["data"].get("rc", 0)
-            try: s["rare_candy"] += int(rc)
-            except: pass
 
     # Afgeleide metrics
     s["runaways"]   = max(0, s["encounters"] - s["catches"])
@@ -221,7 +210,6 @@ def build_stats():
     # Laatste X
     s["latest_catches"] = [r for r in rows if r["type"] == "Catch"][-5:]
     s["latest_shinies"] = [r for r in rows if r["type"] == "Shiny"][-5:]
-    s["latest_rewards"] = [r for r in rows if r["type"] == "Reward"][-3:]
     return s
 
 def _fmt_when(ts: float, style: str = "f"):
@@ -281,18 +269,17 @@ def build_embed(mode: str = "catch"):
         f"Quest: {s['quests']}\n"
         f"Rocket Battle: {s['rockets']}\n"
         f"Raid: {s['raids']}\n"
-        f"Hatch: {s['hatches']}\n"
-        f"Reward: {s['rewards']}"
+        f"Hatch: {s['hatches']}"
     )
     emb.add_field(name="**Event breakdown**", value=breakdown, inline=False)
 
-    # Rates + RC + Runaways (inline)
+    # Rates + Runaways + Perfect 100 (inline)
     if mode == "catch":
         emb.add_field(name="🎯 Catch rate", value=f"{s['catch_rate']:.1f}%", inline=True)
     else:
         emb.add_field(name="✨ Shiny rate", value=f"{s['shiny_rate']:.3f}%", inline=True)
     emb.add_field(name="🏃 Runaways (est.)", value=str(s["runaways"]), inline=True)
-    emb.add_field(name="🍬 Rare Candy earned", value=str(s["rare_candy"]), inline=True)
+    emb.add_field(name="🏆 Perfect 100 IV", value=str(s["perfect_100"]), inline=True)
 
     # Latest
     emb.add_field(
@@ -303,11 +290,6 @@ def build_embed(mode: str = "catch"):
     emb.add_field(
         name="✨ Latest Shinies",
         value=fmt_latest(s["latest_shinies"], with_iv=True, mark_shiny_in_catches=False),
-        inline=False
-    )
-    emb.add_field(
-        name="🎁 Recent Rewards",
-        value=fmt_latest(s["latest_rewards"], with_iv=False, mark_shiny_in_catches=False),
         inline=False
     )
 
@@ -339,8 +321,8 @@ async def backfill_from_channel(limit: int = 500):
                     if evt == "Shiny" and ("caught" in title_l or "caught successfully" in title_l):
                         add_event("Catch", payload, ts=ts)
 
-                    # Quest telt ook als Encounter
-                    if evt == "Quest":
+                    # Quest & Raid/MaxBattle tellen ook als Encounter
+                    if evt == "Quest" or evt in {"Raid", "MaxBattle"}:
                         add_event("Encounter", {"name": payload.get("name")}, ts=ts)
 
                     add_event(evt, payload, ts=ts)
@@ -366,16 +348,13 @@ async def on_message(message: discord.Message):
 
                     # Shiny die ook als Catch telt
                     if evt == "Shiny" and ("caught" in title_l or "caught successfully" in title_l):
-                        add_event("Catch", payload, ts=ts)
-                        recognized += 1
+                        add_event("Catch", payload, ts=ts); recognized += 1
 
-                    # Quest telt ook als Encounter
-                    if evt == "Quest":
-                        add_event("Encounter", {"name": payload.get("name")}, ts=ts)
-                        recognized += 1
+                    # Quest & Raid/MaxBattle tellen ook als Encounter
+                    if evt == "Quest" or evt in {"Raid", "MaxBattle"}:
+                        add_event("Encounter", {"name": payload.get("name")}, ts=ts); recognized += 1
 
-                    add_event(evt, payload, ts=ts)
-                    recognized += 1
+                    add_event(evt, payload, ts=ts); recognized += 1
             if recognized:
                 print(f"[INGEST] Parsed {recognized} PolygonX event(s) from message {message.id}")
     except Exception as e:
