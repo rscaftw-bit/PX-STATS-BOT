@@ -107,57 +107,70 @@ def _extract_iv_pct(e: discord.Embed) -> Optional[int]:
     atk, de, st = map(int, m.groups())
     return round((atk + de + st) / 45 * 100)
 
-# =========================
-# PolygonX embed parser
-# =========================
 def _gather_text(e: discord.Embed) -> str:
     parts = [e.title or "", e.description or ""]
     for f in e.fields:
         parts.append(f"{f.name}\n{f.value}")
     return "\n".join(parts).lower()
 
+# =========================
+# PolygonX embed parser
+# =========================
 def parse_polygonx_embed(e: discord.Embed):
     title = (e.title or "").strip()
-    t = title.lower()
-    fulltext = _gather_text(e)
+    full = _gather_text(e)
 
-    # Shiny (kan in titel, description of fields staan)
-    if any(x in fulltext for x in ["shiny", "✨", ":sparkles:"]):
+    # --- Shiny: kan in titel/description/fields ---
+    if any(x in full for x in ["shiny", "✨", ":sparkles:"]):
         return ("Shiny", {"name": _extract_pokemon_name(e), "iv_pct": _extract_iv_pct(e)})
 
-    # Catch
-    if "pokemon caught successfully" in t or "caught successfully" in t:
+    # --- Catch ---
+    if "caught successfully" in full or "pokemon caught" in full:
         return ("Catch", {"name": _extract_pokemon_name(e), "iv_pct": _extract_iv_pct(e)})
 
-    # Fled
-    if "fled" in t or "ran away" in t or "ran-away" in t:
+    # --- Fled ---
+    if "fled" in full or "ran away" in full or "ran-away" in full:
         return ("Fled", {"name": _extract_pokemon_name(e)})
 
-    # Encounters: we tellen bewust ALLE encounters (voor runaways/catch-rate)
-    if "encounter" in t and "rocket" not in t:
-        payload = {"name": _extract_pokemon_name(e)}
-        if "incense" in t: payload["incense"] = True
-        if "lure" in t:    payload["lure"] = True
-        return ("Encounter", payload)
+    # --- Quest (met naam) ---
+    if "quest" in full:
+        return ("Quest", {"name": _extract_pokemon_name(e)})
 
-    # Overigen
-    if "lure" in t:        return ("Lure", {"title": title})
-    if "incense" in t:     return ("Incense", {"title": title})
-    if "max battle" in t:  return ("MaxBattle", {"title": title})
-    if "quest" in t:       return ("Quest", {"title": title})
-    if "rocket" in t:      return ("Rocket", {"title": title})
-    if "raid" in t:        return ("Raid", {"title": title})
-    if "hatch" in t:       return ("Hatch", {"name": _extract_pokemon_name(e) or title})
-    if "reward" in t or "rewards" in t or "loot" in t:
+    # --- Breed Encounter (we tellen ALLE non-rocket encounters) ---
+    if "encounter" in full and "rocket" not in full:
+        payload = {"name": _extract_pokemon_name(e)}
+        if "incense" in full: payload["incense"] = True
+        if "lure" in full:    payload["lure"] = True
+        encounter_guess = ("Encounter", payload)
+    else:
+        encounter_guess = (None, None)
+
+    # --- Raid (ook 'raid battle encounter') ---
+    if "raid" in full or "raid battle" in full:
+        return ("Raid", {"title": title, "name": _extract_pokemon_name(e)})
+
+    # --- Max Battle (alles met 'battle'+'encounter' zonder raid/rocket) ---
+    if "battle" in full and "encounter" in full and "raid" not in full and "rocket" not in full:
+        return ("MaxBattle", {"title": title, "name": _extract_pokemon_name(e)})
+
+    # --- Rockets / overige types ---
+    if "rocket" in full:
+        return ("Rocket", {"title": title})
+    if "hatch" in full:
+        return ("Hatch", {"name": _extract_pokemon_name(e) or title})
+    if "lure" in full:
+        return ("Lure", {"title": title})
+    if "incense" in full:
+        return ("Incense", {"title": title})
+    if "reward" in full or "rewards" in full or "loot" in full:
         rare_candy = 0
-        texts = [e.description or ""]
-        for f in e.fields: texts.append(f"{f.name}\n{f.value}")
-        blob = "\n".join(texts)
-        m = RC_PAT.search(blob)
-        if m: rare_candy = int(m.group(2))
+        m = RC_PAT.search(full)
+        if m:
+            rare_candy = int(m.group(2))
         return ("Reward", {"title": title, "rare_candy": rare_candy})
 
-    return (None, None)
+    # geen match → val terug op generieke Encounter (als gedetecteerd)
+    return encounter_guess
 
 # =========================
 # Stats & embed builder
@@ -191,7 +204,7 @@ def build_stats():
         "latest_shinies": [],
         "latest_rewards": [],
         "since_unix": min((r["ts"] for r in rows), default=time.time()),
-        "rows": rows,  # meegeven voor cross-matching (shiny ↔ catch)
+        "rows": rows,  # voor cross-match (shiny ↔ catch)
     }
 
     for r in rows:
@@ -222,7 +235,7 @@ def build_embed(mode: str = "catch"):
     """
     s = build_stats()
 
-    # Voor ✨ in Latest Catches: maak snelle index van shiny-events per naam
+    # ✨ in Latest Catches: index van shiny-events per naam
     shiny_by_name = {}
     for ev in s["rows"]:
         if ev["type"] == "Shiny":
@@ -230,12 +243,11 @@ def build_embed(mode: str = "catch"):
             shiny_by_name.setdefault(nm, []).append(ev["ts"])
 
     def is_catch_shiny(name: str, ts: float) -> bool:
-        # Catch is shiny als er binnen ±180s een Shiny-event met dezelfde naam is
         key = (name or "").lower()
         if key not in shiny_by_name:
             return False
         for t2 in shiny_by_name[key]:
-            if abs(t2 - ts) <= 180:
+            if abs(t2 - ts) <= 180:  # ±3 min
                 return True
         return False
 
@@ -246,9 +258,7 @@ def build_embed(mode: str = "catch"):
             name = it["data"].get("name") or it["data"].get("title") or "?"
             ivp  = it["data"].get("iv_pct")
             ts   = it["ts"]
-            shiny_prefix = ""
-            if mark_shiny_in_catches and is_catch_shiny(name, ts):
-                shiny_prefix = "✨ "
+            shiny_prefix = "✨ " if (mark_shiny_in_catches and is_catch_shiny(name, ts)) else ""
             if with_iv and ivp is not None:
                 lines.append(f"{shiny_prefix}{name} **{ivp}%** ({_fmt_when(ts, 'f')})")
             else:
@@ -322,11 +332,17 @@ async def backfill_from_channel(limit: int = 500):
             for e in m.embeds:
                 evt, payload = parse_polygonx_embed(e)
                 if evt:
-                    # Voeg shiny toe aan beide tellers als het een shiny catch is
-                    title_l = (e.title or "").lower()
                     ts = m.created_at.timestamp()
+                    title_l = (e.title or "").lower()
+
+                    # Shiny die ook duidelijk een 'caught'-titel heeft → tel ook als Catch
                     if evt == "Shiny" and ("caught" in title_l or "caught successfully" in title_l):
                         add_event("Catch", payload, ts=ts)
+
+                    # Quest telt ook als Encounter
+                    if evt == "Quest":
+                        add_event("Encounter", {"name": payload.get("name")}, ts=ts)
+
                     add_event(evt, payload, ts=ts)
         print(f"[BACKFILL] Loaded {len(EVENTS)-count_before} events from history")
     except Exception as e:
@@ -346,11 +362,18 @@ async def on_message(message: discord.Message):
                 evt, payload = parse_polygonx_embed(e)
                 if evt:
                     ts = message.created_at.timestamp()
-                    # Shiny die ook duidelijk een 'caught'-titel heeft → tel ook als Catch
                     title_l = (e.title or "").lower()
+
+                    # Shiny die ook als Catch telt
                     if evt == "Shiny" and ("caught" in title_l or "caught successfully" in title_l):
                         add_event("Catch", payload, ts=ts)
                         recognized += 1
+
+                    # Quest telt ook als Encounter
+                    if evt == "Quest":
+                        add_event("Encounter", {"name": payload.get("name")}, ts=ts)
+                        recognized += 1
+
                     add_event(evt, payload, ts=ts)
                     recognized += 1
             if recognized:
