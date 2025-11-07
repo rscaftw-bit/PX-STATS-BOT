@@ -20,7 +20,7 @@ CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0")) or None
 GUILD_ID = int(os.getenv("GUILD_ID", "0")) or None
 
 intents = discord.Intents.default()
-intents.message_content = True     # nodig om webhook-embeds te lezen
+intents.message_content = True
 intents.members = True
 intents.guilds = True
 
@@ -46,12 +46,12 @@ def start_keepalive():
 # =========================
 # In-memory event storage
 # =========================
-EVENTS = deque(maxlen=10000)  # ringbuffer
+EVENTS = deque(maxlen=10000)
 
 def add_event(evt_type: str, payload: dict, ts: Optional[float] = None):
     EVENTS.append({
-        "ts": ts if ts is not None else time.time(),  # epoch UTC
-        "type": evt_type,                              # "Catch", "Shiny", "Encounter", ...
+        "ts": ts if ts is not None else time.time(),
+        "type": evt_type,
         "data": payload or {}
     })
 
@@ -62,8 +62,8 @@ def last_24h():
 # =========================
 # Parser helpers
 # =========================
-IV_PAT        = re.compile(r"IV\s*:\s*(\d{1,2})/(\d{1,2})/(\d{1,2})", re.I)
-PKM_LINE_PAT  = re.compile(r"^\s*Pok[eé]mon:\s*([A-Za-zÀ-ÿ' .-]+|p\d+)", re.I | re.M)
+IV_PAT       = re.compile(r"IV\s*:\s*(\d{1,2})/(\d{1,2})/(\d{1,2})", re.I)
+PKM_LINE_PAT = re.compile(r"^\s*Pok[eé]mon:\s*([A-Za-zÀ-ÿ' .-]+|p\d+)", re.I | re.M)
 
 def _norm(s: str) -> str:
     return unicodedata.normalize("NFKD", s or "").encode("ascii","ignore").decode().lower().strip()
@@ -72,23 +72,20 @@ def _field_value(emb: discord.Embed, wanted_name: str):
     wn = _norm(wanted_name)
     for f in emb.fields:
         fname = _norm(f.name or "")
-        if fname == wn or "pokemon" in fname:  # accepteer "Pokemon" / "Pokémon" / varianten
+        if fname == wn or "pokemon" in fname:
             return (f.value or "").strip()
     return None
 
 def _extract_pokemon_name(e: discord.Embed):
-    # 1) Field "Pokemon"/"Pokémon"
     val = _field_value(e, "Pokemon")
     if val:
         name = val.split("(")[0].strip()
         if name:
             return name
-    # 2) Description-regel
     if e.description:
         m = PKM_LINE_PAT.search(e.description)
         if m:
             return m.group(1).strip()
-    # 3) Title fallback (pak token vóór "(" als die er is)
     title = (e.title or "")
     m2 = re.search(r"([A-Za-zÀ-ÿ' .-]+|p\d+)\s*\(", title)
     if m2:
@@ -119,7 +116,7 @@ def parse_polygonx_embed(e: discord.Embed):
     title = (e.title or "").strip()
     full = _gather_text(e)
 
-    # --- Shiny: kan in titel/description/fields ---
+    # --- Shiny (titel/description/fields) ---
     if any(x in full for x in ["shiny", "✨", ":sparkles:"]):
         return ("Shiny", {"name": _extract_pokemon_name(e), "iv_pct": _extract_iv_pct(e)})
 
@@ -135,11 +132,12 @@ def parse_polygonx_embed(e: discord.Embed):
     if "quest" in full:
         return ("Quest", {"name": _extract_pokemon_name(e)})
 
-    # --- Breed Encounter (we tellen ALLE non-rocket encounters) ---
+    # --- Generieke Encounter (bronlabel: wild/lure/incense) ---
     if "encounter" in full and "rocket" not in full:
-        payload = {"name": _extract_pokemon_name(e)}
-        if "incense" in full: payload["incense"] = True
-        if "lure" in full:    payload["lure"] = True
+        src = "wild"
+        if "incense" in full: src = "incense"
+        elif "lure" in full:  src = "lure"
+        payload = {"name": _extract_pokemon_name(e), "source": src}
         encounter_guess = ("Encounter", payload)
     else:
         encounter_guess = (None, None)
@@ -148,7 +146,7 @@ def parse_polygonx_embed(e: discord.Embed):
     if "raid" in full or "raid battle" in full:
         return ("Raid", {"title": title, "name": _extract_pokemon_name(e)})
 
-    # --- Max Battle (alles met 'battle'+'encounter' zonder raid/rocket) ---
+    # --- Max Battle (battle encounter zonder raid/rocket) ---
     if "battle" in full and "encounter" in full and "raid" not in full and "rocket" not in full:
         return ("MaxBattle", {"title": title, "name": _extract_pokemon_name(e)})
 
@@ -162,7 +160,6 @@ def parse_polygonx_embed(e: discord.Embed):
     if "incense" in full:
         return ("Incense", {"title": title})
 
-    # geen match → val terug op generieke Encounter (als gedetecteerd)
     return encounter_guess
 
 # =========================
@@ -174,56 +171,58 @@ def build_stats():
     for r in rows:
         by_type[r["type"]] = by_type.get(r["type"], 0) + 1
 
-    # Subcounters uit Encounter payload
-    lure    = sum(1 for r in rows if r["type"] == "Encounter" and r["data"].get("lure"))
-    incense = sum(1 for r in rows if r["type"] == "Encounter" and r["data"].get("incense"))
+    # Encounters per bron
+    enc_wild    = sum(1 for r in rows if r["type"] == "Encounter" and r["data"].get("source","wild") == "wild")
+    enc_lure    = sum(1 for r in rows if r["type"] == "Encounter" and r["data"].get("source") == "lure")
+    enc_incense = sum(1 for r in rows if r["type"] == "Encounter" and r["data"].get("source") == "incense")
 
-    # 100% IV counter (alleen op Catch-events met iv_pct==100)
+    # MaxBattle/Raid/Quest/Rocket tellen als encounters in de som (maar hebben eigen type)
+    enc_maxbattle = by_type.get("MaxBattle", 0)
+    enc_raid      = by_type.get("Raid", 0)
+    enc_quest     = by_type.get("Quest", 0)
+    enc_rocket    = by_type.get("Rocket", 0)
+
+    # 100% IV counter (op catches)
     perfect_100 = sum(1 for r in rows if r["type"] == "Catch" and r["data"].get("iv_pct") == 100)
 
+    # Totale encounters voor rate (Hatch telt NIET mee)
+    enc_total_for_rate = enc_wild + enc_lure + enc_incense + enc_maxbattle + enc_quest + enc_rocket + enc_raid
+
     s = {
-        "encounters": by_type.get("Encounter", 0),
-        "catches":    by_type.get("Catch", 0),
-        "shinies":    by_type.get("Shiny", 0),
-        "raids":      by_type.get("Raid", 0),
-        "rockets":    by_type.get("Rocket", 0),
-        "hatches":    by_type.get("Hatch", 0),
-        "quests":     by_type.get("Quest", 0),
-        "max_battle": by_type.get("MaxBattle", 0),
-        "lure":       lure or by_type.get("Lure", 0),
-        "incense":    incense or by_type.get("Incense", 0),
-        "fled":       by_type.get("Fled", 0),
+        "encounters_wild": enc_wild,
+        "encounters_total_for_rate": enc_total_for_rate,
+
+        "lure": enc_lure,
+        "incense": enc_incense,
+        "max_battle": enc_maxbattle,
+        "quest": enc_quest,
+        "rockets": enc_rocket,
+        "raids": enc_raid,
+        "hatches": by_type.get("Hatch", 0),
+
+        "catches": by_type.get("Catch", 0),
+        "shinies": by_type.get("Shiny", 0),
 
         "perfect_100": perfect_100,
 
-        "latest_catches": [],
-        "latest_shinies": [],
+        "latest_catches": [r for r in rows if r["type"] == "Catch"][-5:],
+        "latest_shinies": [r for r in rows if r["type"] == "Shiny"][-5:],
         "since_unix": min((r["ts"] for r in rows), default=time.time()),
-        "rows": rows,  # voor cross-match (shiny ↔ catch)
+        "rows": rows,
     }
 
-    # Afgeleide metrics
-    s["runaways"]   = max(0, s["encounters"] - s["catches"])
-    s["catch_rate"] = (s["catches"] / s["encounters"] * 100.0) if s["encounters"] > 0 else 0.0
-    s["shiny_rate"] = (s["shinies"] / s["catches"] * 100.0)    if s["catches"]    > 0 else 0.0
-
-    # Laatste X
-    s["latest_catches"] = [r for r in rows if r["type"] == "Catch"][-5:]
-    s["latest_shinies"] = [r for r in rows if r["type"] == "Shiny"][-5:]
+    s["runaways"]   = max(0, s["encounters_total_for_rate"] - s["catches"])
+    s["catch_rate"] = (s["catches"] / s["encounters_total_for_rate"] * 100.0) if s["encounters_total_for_rate"] > 0 else 0.0
+    s["shiny_rate"] = (s["shinies"] / s["catches"] * 100.0) if s["catches"] > 0 else 0.0
     return s
 
 def _fmt_when(ts: float, style: str = "f"):
-    # Discord timestamp markup: <t:unix:style>
     return f"<t:{int(ts)}:{style}>"
 
 def build_embed(mode: str = "catch"):
-    """
-    mode: 'catch' → toon Catch rate
-          'shiny' → toon Shiny rate
-    """
     s = build_stats()
 
-    # ✨ in Latest Catches: index van shiny-events per naam
+    # ✨-markering in Latest Catches via tijd-match
     shiny_by_name = {}
     for ev in s["rows"]:
         if ev["type"] == "Shiny":
@@ -235,45 +234,45 @@ def build_embed(mode: str = "catch"):
         if key not in shiny_by_name:
             return False
         for t2 in shiny_by_name[key]:
-            if abs(t2 - ts) <= 180:  # ±3 min
+            if abs(t2 - ts) <= 180:
                 return True
         return False
 
-    def fmt_latest(items, with_iv=True, mark_shiny_in_catches=False):
+    def fmt_latest(items, with_iv=True, mark_shiny=False):
         if not items: return "—"
         lines = []
-        for it in items[::-1]:  # recentste eerst
+        for it in items[::-1]:
             name = it["data"].get("name") or it["data"].get("title") or "?"
             ivp  = it["data"].get("iv_pct")
             ts   = it["ts"]
-            shiny_prefix = "✨ " if (mark_shiny_in_catches and is_catch_shiny(name, ts)) else ""
+            pref = "✨ " if (mark_shiny and is_catch_shiny(name, ts)) else ""
             if with_iv and ivp is not None:
-                lines.append(f"{shiny_prefix}{name} **{ivp}%** ({_fmt_when(ts, 'f')})")
+                lines.append(f"{pref}{name} **{ivp}%** ({_fmt_when(ts,'f')})")
             else:
-                lines.append(f"{shiny_prefix}{name} ({_fmt_when(ts, 'f')})")
+                lines.append(f"{pref}{name} ({_fmt_when(ts,'f')})")
         return "\n".join(lines[:5])
 
     emb = discord.Embed(title="📊 Today’s Stats (Last 24h)", color=discord.Color.blurple())
 
-    # Bovenste rij (inline)
-    emb.add_field(name="Encounters", value=str(s["encounters"]), inline=True)
-    emb.add_field(name="Catches",   value=str(s["catches"]),   inline=True)
-    emb.add_field(name="Shinies",   value=str(s["shinies"]),   inline=True)
+    # Bovenste rij (inline): toon wild encounters als "Encounters"
+    emb.add_field(name="Encounters", value=str(s["encounters_wild"]), inline=True)
+    emb.add_field(name="Catches",   value=str(s["catches"]),         inline=True)
+    emb.add_field(name="Shinies",   value=str(s["shinies"]),         inline=True)
 
-    # Breakdown
+    # Breakdown (som van bronnen – Hatch getoond maar niet in rate)
     breakdown = (
-        f"Encounter: {s['encounters']}\n"
+        f"Encounter: {s['encounters_wild']}\n"
         f"Lure: {s['lure']}\n"
         f"Incense: {s['incense']}\n"
         f"Max Battle: {s['max_battle']}\n"
-        f"Quest: {s['quests']}\n"
+        f"Quest: {s['quest']}\n"
         f"Rocket Battle: {s['rockets']}\n"
         f"Raid: {s['raids']}\n"
         f"Hatch: {s['hatches']}"
     )
     emb.add_field(name="**Event breakdown**", value=breakdown, inline=False)
 
-    # Rates + Runaways + Perfect 100 (inline)
+    # Rates + Runaways + Perfect 100
     if mode == "catch":
         emb.add_field(name="🎯 Catch rate", value=f"{s['catch_rate']:.1f}%", inline=True)
     else:
@@ -282,20 +281,12 @@ def build_embed(mode: str = "catch"):
     emb.add_field(name="🏆 Perfect 100 IV", value=str(s["perfect_100"]), inline=True)
 
     # Latest
-    emb.add_field(
-        name="🕓 Latest Catches",
-        value=fmt_latest(s["latest_catches"], with_iv=True, mark_shiny_in_catches=True),
-        inline=False
-    )
-    emb.add_field(
-        name="✨ Latest Shinies",
-        value=fmt_latest(s["latest_shinies"], with_iv=True, mark_shiny_in_catches=False),
-        inline=False
-    )
+    emb.add_field(name="🕓 Latest Catches", value=fmt_latest(s["latest_catches"], True, True), inline=False)
+    emb.add_field(name="✨ Latest Shinies", value=fmt_latest(s["latest_shinies"], True, False), inline=False)
 
     since = _fmt_when(s["since_unix"], "f")
     now   = _fmt_when(time.time(), "t")
-    emb.set_footer(text=f"Since {since} • Today at {now}")
+    emb.set_footer(text=f"Since {since} • Today at {now} • Rate base: {s['encounters_total_for_rate']}")
     return emb
 
 # =========================
@@ -317,13 +308,17 @@ async def backfill_from_channel(limit: int = 500):
                     ts = m.created_at.timestamp()
                     title_l = (e.title or "").lower()
 
-                    # Shiny die ook duidelijk een 'caught'-titel heeft → tel ook als Catch
+                    # Shiny die ook catch is (als titel dat zegt)
                     if evt == "Shiny" and ("caught" in title_l or "caught successfully" in title_l):
                         add_event("Catch", payload, ts=ts)
 
-                    # Quest & Raid/MaxBattle tellen ook als Encounter
-                    if evt == "Quest" or evt in {"Raid", "MaxBattle"}:
-                        add_event("Encounter", {"name": payload.get("name")}, ts=ts)
+                    # Quest/Raid/MaxBattle tellen ook als Encounter (met bronlabel)
+                    if evt == "Quest":
+                        add_event("Encounter", {"name": payload.get("name"), "source": "quest"}, ts=ts)
+                    if evt == "Raid":
+                        add_event("Encounter", {"name": payload.get("name"), "source": "raid"}, ts=ts)
+                    if evt == "MaxBattle":
+                        add_event("Encounter", {"name": payload.get("name"), "source": "maxbattle"}, ts=ts)
 
                     add_event(evt, payload, ts=ts)
         print(f"[BACKFILL] Loaded {len(EVENTS)-count_before} events from history")
@@ -346,13 +341,17 @@ async def on_message(message: discord.Message):
                     ts = message.created_at.timestamp()
                     title_l = (e.title or "").lower()
 
-                    # Shiny die ook als Catch telt
+                    # Shiny die ook als Catch telt (indien 'caught' in titel)
                     if evt == "Shiny" and ("caught" in title_l or "caught successfully" in title_l):
                         add_event("Catch", payload, ts=ts); recognized += 1
 
-                    # Quest & Raid/MaxBattle tellen ook als Encounter
-                    if evt == "Quest" or evt in {"Raid", "MaxBattle"}:
-                        add_event("Encounter", {"name": payload.get("name")}, ts=ts); recognized += 1
+                    # Quest/Raid/MaxBattle → ook een Encounter met bronlabel
+                    if evt == "Quest":
+                        add_event("Encounter", {"name": payload.get("name"), "source": "quest"}, ts=ts); recognized += 1
+                    if evt == "Raid":
+                        add_event("Encounter", {"name": payload.get("name"), "source": "raid"}, ts=ts); recognized += 1
+                    if evt == "MaxBattle":
+                        add_event("Encounter", {"name": payload.get("name"), "source": "maxbattle"}, ts=ts); recognized += 1
 
                     add_event(evt, payload, ts=ts); recognized += 1
             if recognized:
@@ -444,7 +443,6 @@ async def on_ready():
     except Exception as e:
         print(f"[SYNC ERROR] {e}")
 
-    # Zet expliciet online + activiteit
     try:
         await client.change_presence(
             status=discord.Status.online,
