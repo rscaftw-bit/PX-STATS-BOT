@@ -124,8 +124,8 @@ def parse_polygonx_embed(e: discord.Embed):
     if "caught successfully" in full or "pokemon caught" in full:
         return ("Catch", {"name": _extract_pokemon_name(e), "iv_pct": _extract_iv_pct(e)})
 
-    # --- Fled ---
-    if "fled" in full or "ran away" in full or "ran-away" in full:
+    # --- Fled / Ran away ---
+    if "flee" in full or "fled" in full or "ran away" in full or "ran-away" in full:
         return ("Fled", {"name": _extract_pokemon_name(e)})
 
     # --- Quest (met naam) ---
@@ -181,18 +181,19 @@ def build_stats():
     enc_quest     = by_type.get("Quest", 0)
     enc_rocket    = by_type.get("Rocket", 0)
     enc_hatch     = by_type.get("Hatch", 0)  # alleen tonen, niet in rate
+    fled_count    = by_type.get("Fled", 0)   # runaway teller (alleen tonen)
 
     # 100% IV counter (op catches)
     perfect_100 = sum(1 for r in rows if r["type"] == "Catch" and r["data"].get("iv_pct") == 100)
 
-    # Totale encounters uit expliciete bronnen (Hatch telt NIET mee)
+    # Totale encounters uit expliciete bronnen (Hatch NIET mee)
     enc_total_sources = enc_wild + enc_lure + enc_incense + enc_maxbattle + enc_quest + enc_rocket + enc_raid
 
     # Sommige catches hebben geen aparte 'Encounter' webhook → rate-basis mag catches niet onderschrijden
     rate_base = max(enc_total_sources, by_type.get("Catch", 0))
 
     s = {
-        # Bovenaan tonen we deze als "Encounters"
+        # Rate-basis (bovenaan als "Encounters")
         "encounters_total_for_rate": rate_base,
 
         # Breakdown
@@ -204,6 +205,7 @@ def build_stats():
         "rockets": enc_rocket,
         "raids": enc_raid,
         "hatches": enc_hatch,
+        "fled": fled_count,
 
         # Hoofdstatistieken
         "catches": by_type.get("Catch", 0),
@@ -230,7 +232,7 @@ def _fmt_when(ts: float, style: str = "f"):
 def build_embed(mode: str = "catch"):
     s = build_stats()
 
-    # ✨-markering in Latest Catches via tijd-match
+    # ✨-markering in Latest Catches via tijd-match met shiny
     shiny_by_name = {}
     for ev in s["rows"]:
         if ev["type"] == "Shiny":
@@ -267,7 +269,7 @@ def build_embed(mode: str = "catch"):
     emb.add_field(name="Catches",   value=str(s["catches"]),                  inline=True)
     emb.add_field(name="Shinies",   value=str(s["shinies"]),                  inline=True)
 
-    # Breakdown (Wild apart; Hatch niet in rate)
+    # Breakdown (Wild apart; Hatch & Fled alleen tonen)
     breakdown = (
         f"Wild: {s['encounters_wild']}\n"
         f"Lure: {s['lure']}\n"
@@ -276,6 +278,7 @@ def build_embed(mode: str = "catch"):
         f"Quest: {s['quest']}\n"
         f"Rocket Battle: {s['rockets']}\n"
         f"Raid: {s['raids']}\n"
+        f"Runaways: {s['fled']}\n"
         f"Hatch: {s['hatches']}"
     )
     emb.add_field(name="**Event breakdown**", value=breakdown, inline=False)
