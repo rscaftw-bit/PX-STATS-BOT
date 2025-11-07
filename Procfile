@@ -1,3 +1,5 @@
-web: python bot.py
+web: python PXstats/main.py
+
+
 
 
