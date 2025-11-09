@@ -1,8 +1,9 @@
 # main.py
-VERSION = "main-v3 • 2025-11-09"
+VERSION = "main-v3.3 • 2025-11-09 (pairing 10s)"
 
 import os, time, asyncio, datetime, discord
 from discord import app_commands
+from collections import deque
 
 from utils import (
     start_keepalive, load_events, save_events, EVENTS, TZ, add_event
@@ -14,43 +15,101 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0")) or None
 GUILD_ID = os.getenv("GUILD_ID")  # optional
 
+# ---------------- Pairing config ----------------
+PAIR_WINDOW_SEC = 10  # Catch binnen 10s na Raid/MaxBattle = gepaird
+# Bewaar de laatste "battle encounters" per naam
+RECENT_BATTLES = deque(maxlen=200)  # items: (ts, name, kind) kind in {"raid","maxbattle"}
+
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
-# --------- INGEST + ENCOUNTER-AUGMENT ----------
+
+def _battle_recent_for(name: str, now_ts: float) -> str | None:
+    """Return 'raid'/'maxbattle' als er binnen window een battle van dezelfde naam was."""
+    if not name:
+        return None
+    for (ts, nm, kind) in reversed(RECENT_BATTLES):
+        if nm == name and (now_ts - ts) <= PAIR_WINDOW_SEC:
+            return kind
+    return None
+
+
+def _push_battle(name: str, kind: str, ts: float):
+    """Sla battle event op voor pairing; voorkom dubbele 'raid/maxbattle' spam."""
+    # Als exact dezelfde battle (naam+kind) al net kwam binnen 10s, negeren
+    if _battle_recent_for(name, ts) == kind:
+        return False
+    RECENT_BATTLES.append((ts, name, kind))
+    return True
+
+
+# --------- INGEST + ENCOUNTER-AUGMENT + PAIRING ----------
 @client.event
 async def on_message(m: discord.Message):
     if m.author == client.user or not m.embeds:
         return
-    rec = 0
+
+    wrote = False
     for e in m.embeds:
         evt, p = parse_polygonx_embed(e)
         if not evt:
             continue
+
         ts = m.created_at.timestamp()
+        name = (p or {}).get("name") or ""
 
-        # Shiny telt ook als Catch indien het een vangst is (meestal zo)
-        if evt == "Shiny":
-            add_event("Catch", p, ts); rec += 1
-
-        # Label ook als Encounter met bron zodat breakdown werkt
-        if evt == "Quest":
-            add_event("Encounter", {"name": p.get("name"), "source": "quest"}, ts); rec += 1
+        # 1) Battle types: onthouden voor pairing (10s)
         if evt == "Raid":
-            add_event("Encounter", {"name": p.get("name"), "source": "raid"}, ts); rec += 1
+            if _push_battle(name, "raid", ts):
+                # tel raid encounter één keer
+                add_event("Encounter", {"name": name, "source": "raid"}, ts)
+                add_event("Raid", {"name": name}, ts)
+                wrote = True
+            # Als duplicate binnen 10s: sla over
+            continue
+
         if evt == "MaxBattle":
-            add_event("Encounter", {"name": p.get("name"), "source": "maxbattle"}, ts); rec += 1
-        if evt == "Rocket":
-            add_event("Encounter", {"name": p.get("name"), "source": "rocket"}, ts); rec += 1
-        if evt == "Encounter" and "source" in p:
-            add_event("Encounter", p, ts); rec += 1
+            if _push_battle(name, "maxbattle", ts):
+                add_event("Encounter", {"name": name, "source": "maxbattle"}, ts)
+                add_event("MaxBattle", {"name": name}, ts)
+                wrote = True
+            continue
 
-        add_event(evt, p, ts); rec += 1
+        # 2) Encounter van wild/quest/rocket: skippen indien net gepaird met battle
+        if evt == "Encounter":
+            paired_kind = _battle_recent_for(name, ts)
+            if paired_kind:
+                # Laat Encounter die enkel het battle-event duidt weg
+                # (Raid/MaxBattle hierboven hebben zelf al een Encounter entry toegevoegd)
+                continue
+            add_event("Encounter", p, ts)
+            wrote = True
+            continue
 
-    if rec:
+        # 3) Shiny: telt als Catch + Shiny
+        if evt == "Shiny":
+            # koppelen mag, maar Catch blijft meetellen (doel = 1 Raid + 1 Catch)
+            add_event("Catch", p, ts)
+            add_event("Shiny", p, ts)
+            wrote = True
+            continue
+
+        # 4) Catch: koppelen aan battle indien aanwezig (geen extra Encounter nodig)
+        if evt == "Catch":
+            # geen extra logic nodig; pairing vermijdt al dubbele encounter events
+            add_event("Catch", p, ts)
+            wrote = True
+            continue
+
+        # 5) Overige types direct loggen
+        add_event(evt, p, ts)
+        wrote = True
+
+    if wrote:
         save_events()
+
 
 # --------- COMMANDS (met veilige defer) ----------
 @tree.command(name="summary", description="Toon de laatste 24u stats")
@@ -66,7 +125,7 @@ async def summary(i: discord.Interaction):
 @tree.command(name="status", description="Toon uptime en aantal events")
 async def status(i: discord.Interaction):
     try:
-        await i.response.defer(ephemeral=True, thinking=False)
+        await i.response.defer(ephemeral=True)
     except discord.InteractionResponded:
         pass
     up = time.time() - getattr(client, "start_time", time.time())
@@ -88,13 +147,14 @@ async def export(i: discord.Interaction):
 @tree.command(name="reload", description="Herlaad Pokédex en events zonder restart")
 async def reload_cmd(inter: discord.Interaction):
     try:
-        await inter.response.defer(ephemeral=True, thinking=False)
+        await inter.response.defer(ephemeral=True)
     except discord.InteractionResponded:
         pass
     from utils import _load_pokedex, load_events
     load_events()
     _load_pokedex()
     await inter.followup.send("🔄 Pokédex en events opnieuw geladen!", ephemeral=True)
+
 
 # --------- DAILY SUMMARY LOOP ----------
 async def daily_summary():
