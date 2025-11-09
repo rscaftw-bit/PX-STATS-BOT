@@ -43,17 +43,31 @@ def parse_polygonx_embed(e) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
 
     data = _extract_basic_fields(full_text_raw)
 
-    # 1) CATCH / SHINY (zoek shiny in titel+beschrijving+velden)
-    if "pokemon caught successfully" in title:
-        blob = (title_raw + " " + desc + " " + fields_blob).lower()
-        shiny_triggers = [" shiny", "shiny ✨", "shiny!", "⭐", "✨"]
-        is_shiny = any(t in blob for t in shiny_triggers)
-        if is_shiny:
-            data["shiny"] = True
-            print(f"[PARSE] SHINY DETECTED: {data.get('name')} IV={data.get('iv')} • L={data.get('level')}")
-            return "Shiny", data
-        print(f"[PARSE] CATCH: {data.get('name')} IV={data.get('iv')}")
-        return "Catch", data
+
+# 1) CATCH / SHINY
+if "pokemon caught successfully" in title:
+    blob = (title_raw + " " + desc + " " + fields_blob).lower()
+
+    # --- Shiny-detectie ---
+    # werkt met "SHINY ✨", "⭐" of alleen "✨" (zoals in jouw embed)
+    shiny_triggers = [" shiny", "✨", "⭐"]
+    is_shiny = any(t in blob for t in shiny_triggers)
+
+    # extra check: Discord embed emoji's (zoals in de naam of thumbnail)
+    if not is_shiny and getattr(e, "footer", None):
+        foot_text = (e.footer.text or "").lower()
+        if "✨" in foot_text or "⭐" in foot_text or "shiny" in foot_text:
+            is_shiny = True
+
+    if is_shiny:
+        data["shiny"] = True
+        print(f"[PARSE] SHINY DETECTED: {data.get('name')} IV={data.get('iv')} L={data.get('level')}")
+        return "Shiny", data
+
+    print(f"[PARSE] CATCH: {data.get('name')} IV={data.get('iv')}")
+    return "Catch", data
+
+
 
     # 2) ROCKET / INVASION
     if ("invasion encounter" in title) or any(k in full_norm for k in [" rocket", "grunt", "leader", "giovanni"]):

@@ -127,22 +127,41 @@ class SummaryView(View):
         await interaction.response.edit_message(embed=build_embed(self.mode), view=self)
 
 # CSV export helper (slash command roept deze aan)
-async def export_csv(interaction: discord.Interaction):
-    rows = last_24h()
+async def export_csv(interaction: discord.Interaction, hours: int = 24, all_rows: bool = False):
+    """
+    Exporteer events:
+      - all_rows=True  -> alle geladen events (events.json + runtime)
+      - anders         -> laatste 'hours' uur (default 24)
+    """
+    import csv, io, time
+    from utils import EVENTS, last_24h
+
+    if all_rows:
+        rows = list(EVENTS)
+    else:
+        # gebruik dezelfde window als de summary
+        if hours == 24:
+            rows = last_24h()
+        else:
+            cutoff = time.time() - hours * 3600
+            rows = [r for r in list(EVENTS) if float(r.get("ts", 0)) >= cutoff]
+
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["timestamp", "type", "pokemon", "iv", "shiny"])
     for r in rows:
         iv = r["data"].get("iv")
+        ivs = f"{iv[0]}/{iv[1]}/{iv[2]}" if (isinstance(iv, (list, tuple)) and len(iv) == 3) else ""
         w.writerow([
             int(r["ts"]),
             r["type"],
             r["data"].get("name","?"),
-            _fmt_iv(iv),
+            ivs,
             "yes" if r["data"].get("shiny") else ""
         ])
     data = buf.getvalue().encode()
     await interaction.followup.send(
-        file=discord.File(io.BytesIO(data), filename="pxstats_last24h.csv"),
+        file=discord.File(io.BytesIO(data), filename=f"pxstats_{'all' if all_rows else f'last{hours}h'}.csv"),
         ephemeral=True
     )
+
