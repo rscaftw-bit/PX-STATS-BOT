@@ -1,84 +1,75 @@
-# parser.py — v3.8 (emoji-safe shiny + alle bronnen)
-from __future__ import annotations
+# PXstats v3.8 – parser.py
+# Detects all encounter types & shiny properly
+
 import re, unicodedata
-from typing import Tuple, Optional, Dict, Any
-from utils import translate_pnumber
+from typing import Tuple, Optional
+import discord
 
-def _norm(s: Optional[str]) -> str:
-    return unicodedata.normalize("NFKD", (s or "")).encode("ascii", "ignore").decode().lower().strip()
+IV_TRIPLE = re.compile(r"IV\s*[:：]?\s*(\d{1,2})/(\d{1,2})/(\d{1,2})", re.I)
 
-def _extract_basic_fields(text: str) -> Dict[str, Any]:
-    data: Dict[str, Any] = {"name": None, "iv": None, "level": None, "cp": None}
-    m = re.search(r"pokemon:\s*([^\n\r(]+)", text, re.I)
-    if m:
-        data["name"] = translate_pnumber(m.group(1).strip())
-    m = re.search(r"\biv\s*:\s*(\d{1,2})/(\d{1,2})/(\d{1,2})", text, re.I)
-    if m:
-        try: data["iv"] = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
-        except: pass
-    m = re.search(r"\blevel\s*:\s*(\d{1,2})\b", text, re.I)
-    if m:
-        try: data["level"] = int(m.group(1))
-        except: pass
-    m = re.search(r"\bcp\s*:\s*(\d{1,5})\b", text, re.I)
-    if m:
-        try: data["cp"] = int(m.group(1))
-        except: pass
-    return data
+def _norm(s: str) -> str:
+    return unicodedata.normalize("NFKD", s or "").encode("ascii","ignore").decode().lower().strip()
 
-def parse_polygonx_embed(e) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
-    title_raw: str = getattr(e, "title", "") or ""
-    desc: str = getattr(e, "description", "") or ""
-    fields_blob = "\n".join(f"{(f.name or '')}\n{(f.value or '')}" for f in getattr(e, "fields", []))
+def _extract_name(desc: str) -> str:
+    m = re.search(r"pokemon:\s*([A-Za-zÀ-ÿ' .-]+|p\s*\d+)", desc, re.I)
+    if m: return m.group(1).strip()
+    return "?"
 
-    title = _norm(title_raw)
-    full_text_raw = f"{title_raw}\n{desc}\n{fields_blob}"
-    full_norm = _norm(full_text_raw)
-    data = _extract_basic_fields(full_text_raw)
+def _extract_iv(desc: str):
+    m = IV_TRIPLE.search(desc)
+    if not m: return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
 
-    # 1) CATCH / SHINY — emoji blijven behouden!
-    if "pokemon caught successfully" in title:
-        blob = (title_raw + " " + desc + " " + fields_blob)
-        lower_blob = blob.lower()
-        shiny_triggers = [" shiny", "shiny ✨", "shiny!", "⭐", "✨", "✦", "★", "🌟"]
-        is_shiny = any(t in blob or t in lower_blob for t in shiny_triggers)
-        if is_shiny:
-            data["shiny"] = True
-            print(f"[PARSE] SHINY DETECTED: {data.get('name')} IV={data.get('iv')} • L={data.get('level')}")
+def parse_polygonx_embed(e: discord.Embed) -> Tuple[Optional[str], dict]:
+    title = (e.title or "")
+    desc = (e.description or "")
+    full = f"{title}\n{desc}\n" + "\n".join(f"{f.name}\n{f.value}" for f in e.fields)
+    full_norm = _norm(full)
+
+    data = {
+        "name": _extract_name(full),
+        "iv": _extract_iv(full),
+        "level": None
+    }
+
+    # Shiny detection
+    shiny_triggers = [" shiny", "✨", "⭐", "★", "🌟"]
+    if any(t in full.lower() for t in shiny_triggers):
+        data["shiny"] = True
+
+    # Catch / Shiny
+    if "caught successfully" in full_norm or "pokemon caught" in full_norm:
+        if data.get("shiny"): 
             return "Shiny", data
-        print(f"[PARSE] CATCH: {data.get('name')} IV={data.get('iv')}")
         return "Catch", data
 
-    # 2) ROCKET / INVASION
-    if ("invasion encounter" in title) or any(k in full_norm for k in [" rocket", "grunt", "leader", "giovanni"]):
-        data["source"] = "rocket"; print(f"[PARSE] ROCKET: {data.get('name')}"); return "Rocket", data
+    # Quest encounter
+    if "quest" in full_norm:
+        return "Quest", data
 
-    # 3) QUEST
-    if "quest encounter" in title or " quest " in full_norm:
-        data["source"] = "quest"; print(f"[PARSE] QUEST: {data.get('name')}"); return "Quest", data
+    # Rocket encounters
+    if any(k in full_norm for k in ["rocket", "invasion", "grunt", "leader", "giovanni"]):
+        return "Rocket", data
 
-    # 4) RAID
-    if ("complete raid battle encounter" in title) or (" raid " in full_norm and "battle encounter" in full_norm):
-        data["source"] = "raid"; print(f"[PARSE] RAID: {data.get('name')}"); return "Raid", data
+    # Raid / Max battle
+    if "raid" in full_norm:
+        return "Raid", data
+    if "max battle" in full_norm:
+        return "MaxBattle", data
 
-    # 5) MAX BATTLE (incl. Bread Battle)
-    if ("complete max battle encounter" in title
-        or "complete bread battle encounter" in title
-        or ("complete" in full_norm and "battle encounter" in full_norm and "raid" not in full_norm)):
-        data["source"] = "maxbattle"; print(f"[PARSE] MAXBATTLE: {data.get('name')}"); return "MaxBattle", data
+    # Hatch
+    if "hatch" in full_norm:
+        return "Hatch", data
 
-    # 6) WILD ENCOUNTER
-    if ("encounter ping" in title
-        or "wild encounter" in full_norm
-        or (" encounter!" in title and all(k not in full_norm for k in ["quest","raid","battle"]))):
-        data["source"] = "wild"; print(f"[PARSE] ENCOUNTER (wild): {data.get('name')}"); return "Encounter", data
+    # Encounter
+    if "encounter" in full_norm:
+        src = "wild"
+        if "incense" in full_norm: src = "incense"
+        elif "lure" in full_norm: src = "lure"
+        return "Encounter", {"name": data["name"], "source": src}
 
-    # 7) HATCH
-    if " hatch" in full_norm or "hatched" in full_norm:
-        print(f"[PARSE] HATCH: {data.get('name')}"); return "Hatch", data
+    # Fled
+    if any(k in full_norm for k in ["fled", "flee", "ran away"]):
+        return "Fled", data
 
-    # 8) FLED
-    if any(k in full_norm for k in [" flee", " fled", " run away"]):
-        print(f"[PARSE] FLED: {data.get('name')}"); return "Fled", data
-
-    return None, None
+    return None, {}
