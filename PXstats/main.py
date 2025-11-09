@@ -1,7 +1,7 @@
 # main.py
-VERSION = "main-v3.5 • 2025-11-09 (pairing+shiny-log+download)"
+VERSION = "main-v3.6 • 2025-11-09 (pairing+shiny-log+robust-download)"
 
-import os, io, json, time, asyncio, datetime, discord
+import os, io, json, gzip, math, time, asyncio, datetime, discord
 from discord import app_commands
 from collections import deque
 
@@ -24,7 +24,7 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
-
+# ---------- helpers ----------
 def _battle_recent_for(name: str, now_ts: float) -> str | None:
     if not name:
         return None
@@ -33,14 +33,33 @@ def _battle_recent_for(name: str, now_ts: float) -> str | None:
             return kind
     return None
 
-
 def _push_battle(name: str, kind: str, ts: float):
     if not name:
         return False
+    # Als exact dezelfde battle (naam+kind) al net kwam binnen window, negeren
     if _battle_recent_for(name, ts) == kind:
         return False
     RECENT_BATTLES.append((ts, name, kind))
     return True
+
+# ---------- robust file sending ----------
+MAX_DISCORD_BYTES = 7_500_000  # ~7.5 MB marge
+
+async def _send_bytes_as_file(i: discord.Interaction, data: bytes, filename: str, content: str):
+    await i.followup.send(content=content, file=discord.File(io.BytesIO(data), filename=filename), ephemeral=False)
+
+def _serialize_events_slice(evs):
+    return json.dumps(evs, ensure_ascii=False, separators=(",", ":")).encode()
+
+def _read_events_bytes():
+    # Prefer file op disk; fallback naar in-memory
+    if os.path.exists(SAVE_PATH):
+        try:
+            with open(SAVE_PATH, "rb") as f:
+                return f.read()
+        except Exception:
+            pass
+    return _serialize_events_slice(list(EVENTS))
 
 
 # --------- INGEST + ENCOUNTER-AUGMENT + PAIRING ----------
@@ -58,7 +77,7 @@ async def on_message(m: discord.Message):
         ts = m.created_at.timestamp()
         name = (p or {}).get("name") or ""
 
-        # 1) Battle types
+        # 1) Raid/MaxBattle: onthouden + 1× loggen (+ eigen Encounter)
         if evt == "Raid":
             if _push_battle(name, "raid", ts):
                 add_event("Encounter", {"name": name, "source": "raid"}, ts)
@@ -73,15 +92,15 @@ async def on_message(m: discord.Message):
                 wrote = True
             continue
 
-        # 2) Encounter wild/quest/rocket
+        # 2) Wild/Quest/Rocket Encounters: skippen als net gepaird met battle
         if evt == "Encounter":
             if _battle_recent_for(name, ts):
-                continue
+                continue  # Raid/MaxBattle hebben hun eigen Encounter al gelogd
             add_event("Encounter", p, ts)
             wrote = True
             continue
 
-        # 3) Shiny => Catch(shiny=True) + Shiny
+        # 3) Shiny: ALTIJD Catch(shiny=True) + Shiny loggen
         if evt == "Shiny":
             p = p or {}
             p["shiny"] = True
@@ -91,13 +110,13 @@ async def on_message(m: discord.Message):
             wrote = True
             continue
 
-        # 4) Catch
+        # 4) Catch (gewone vangst)
         if evt == "Catch":
             add_event("Catch", p, ts)
             wrote = True
             continue
 
-        # 5) Overige
+        # 5) Overigen rechtstreeks loggen (Quest/Rocket/Hatch/Fled, etc.)
         add_event(evt, p, ts)
         wrote = True
 
@@ -149,37 +168,71 @@ async def reload_cmd(inter: discord.Interaction):
     _load_pokedex()
     await inter.followup.send("🔄 Pokédex en events opnieuw geladen!", ephemeral=True)
 
-
-# --------- NIEUW: events.json downloaden ----------
-@tree.command(name="download_events", description="Download events.json als bestand (ephemeral).")
+# ---------- downloads ----------
+@tree.command(name="download_events", description="Download events.json (auto-compress/split).")
 async def download_events(i: discord.Interaction):
     try:
-        await i.response.defer(ephemeral=True, thinking=False)
+        await i.response.defer(ephemeral=False, thinking=True)
     except discord.InteractionResponded:
         pass
 
-    # Lees file indien aanwezig, anders maak JSON vanuit memory
-    payload = None
-    if os.path.exists(SAVE_PATH):
-        try:
-            with open(SAVE_PATH, "rb") as f:
-                payload = f.read()
-        except Exception as e:
-            print("[DOWNLOAD ERR] reading file:", e)
+    raw = _read_events_bytes()
 
-    if payload is None:
-        try:
-            payload = json.dumps(list(EVENTS), ensure_ascii=False).encode()
-        except Exception as e:
-            await i.followup.send(f"⚠️ Kon events niet serialiseren: {e}", ephemeral=True)
-            return
+    # 1) Past? stuur plain JSON
+    if len(raw) <= MAX_DISCORD_BYTES:
+        await _send_bytes_as_file(i, raw, "events.json", "📦 events.json")
+        return
 
-    await i.followup.send(
-        file=discord.File(io.BytesIO(payload), filename="events.json"),
-        ephemeral=True
-    )
+    # 2) Probeer gzip
+    gz = gzip.compress(raw)
+    if len(gz) <= MAX_DISCORD_BYTES:
+        await _send_bytes_as_file(i, gz, "events.json.gz", "📦 events.json.gz (compressed)")
+        return
 
-# --------- NIEUW: recente shinies ----------
+    # 3) Split in meerdere delen (JSON)
+    evs = list(EVENTS)
+    if not evs:
+        await i.followup.send("Geen events om te downloaden.", ephemeral=False)
+        return
+
+    avg = max(1, len(raw) // max(1, len(evs)))
+    per_part = max(1, (MAX_DISCORD_BYTES // avg))
+    parts = math.ceil(len(evs) / per_part)
+    await i.followup.send(f"📄 events.json is groot; ik stuur {parts} delen…", ephemeral=False)
+
+    start = 0
+    part_idx = 1
+    while start < len(evs):
+        chunk = evs[start:start+per_part]
+        start += per_part
+        payload = _serialize_events_slice(chunk)
+        name = f"events.part{part_idx:02d}.json"
+        await _send_bytes_as_file(i, payload, name, f"📦 {name}")
+        part_idx += 1
+
+@tree.command(name="download_last", description="Download de laatste N events als JSON.")
+@app_commands.describe(count="Aantal events (1–50000), default 5000")
+async def download_last(i: discord.Interaction, count: int = 5000):
+    try:
+        await i.response.defer(ephemeral=False, thinking=False)
+    except discord.InteractionResponded:
+        pass
+
+    count = max(1, min(50000, count))
+    evs = list(EVENTS)[-count:]
+    if not evs:
+        await i.followup.send("Geen events gevonden.", ephemeral=False)
+        return
+
+    data = _serialize_events_slice(evs)
+    fn = f"events_last_{len(evs)}.json"
+    if len(data) > MAX_DISCORD_BYTES:
+        data = gzip.compress(data)
+        fn += ".gz"
+        await _send_bytes_as_file(i, data, fn, f"📦 {fn} (compressed)")
+    else:
+        await _send_bytes_as_file(i, data, fn, f"📦 {fn}")
+
 @tree.command(name="recent_shinies", description="Toon de laatste shinies (default 10).")
 @app_commands.describe(limit="Aantal regels (max 50)")
 async def recent_shinies(i: discord.Interaction, limit: int = 10):
