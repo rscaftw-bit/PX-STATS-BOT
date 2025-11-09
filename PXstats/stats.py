@@ -1,4 +1,6 @@
 # stats.py
+VERSION = "stats-v3 • 2025-11-09"
+
 import time, csv, io, discord
 from discord.ui import View, Button
 from utils import last_24h
@@ -10,7 +12,7 @@ def build_stats():
         by_type[r["type"]] = by_type.get(r["type"], 0) + 1
 
     # Encounters per bron (we labelen bronnen via aparte Encounter events)
-    def enc(src): 
+    def enc(src):
         return sum(1 for r in rows if r["type"] == "Encounter" and r["data"].get("source") == src)
 
     s = dict(
@@ -29,13 +31,14 @@ def build_stats():
         shinies = by_type.get("Shiny", 0),
     )
 
-    # rate-base = som van alle encounter-bronnen (excl. hatch) of aantal catches (whichever is larger)
+    # rate-base = som encounter-bronnen (excl. hatch) of aantal catches (whichever is larger)
     rate_base = s["wild"] + s["lure"] + s["inc"] + s["max"] + s["quest"] + s["rocket"] + s["raid"]
     s["enc_total"] = max(rate_base, s["catches"])
+    s["runaways"]  = max(0, s["enc_total"] - s["catches"])
 
     # rates
     s["catch_rate"] = (s["catches"] / s["enc_total"] * 100) if s["enc_total"] else 0.0
-    s["shiny_rate"] = (s["shinies"] / max(s["catches"], 1) * 100)  # alleen onder vangers
+    s["shiny_rate"] = (s["shinies"] / max(s["catches"], 1) * 100)
 
     # 100% perfect
     s["perfect"] = sum(1 for r in rows if r["type"] == "Catch" and r["data"].get("iv") == (15, 15, 15))
@@ -50,7 +53,6 @@ def build_stats():
 
     s["since"] = min((r["ts"] for r in rows), default=time.time())
     s["rows"] = rows
-    s["runaways"] = max(0, s["enc_total"] - s["catches"])
     return s
 
 def _fmt_when(ts, style="f"):
@@ -81,7 +83,7 @@ def build_embed(mode="catch"):
     emb.add_field(name="Catches",   value=str(s["catches"]),    inline=True)
     emb.add_field(name="Shinies",   value=str(s["shinies"]),    inline=True)
 
-    # Breakdown per bron (duidelijk en compact)
+    # Breakdown per bron
     breakdown = (
         f"Wild: {s['wild']}\n"
         f"Lure: {s['lure']}\n"
@@ -95,7 +97,7 @@ def build_embed(mode="catch"):
     )
     emb.add_field(name="**Event breakdown**", value=breakdown, inline=False)
 
-    # Rates en perfects
+    # Rates + perfect
     if mode == "catch":
         emb.add_field(name="🎯 Catch rate", value=f"{s['catch_rate']:.1f}%", inline=True)
     else:
@@ -107,7 +109,7 @@ def build_embed(mode="catch"):
     emb.add_field(name="🕓 Latest Catches", value=_fmt_list(s["latest_catches"], shiny=False), inline=False)
     emb.add_field(name="✨ Latest Shinies", value=_fmt_list(s["latest_shinies"], shiny=True), inline=False)
 
-    emb.set_footer(text=f"Now {_fmt_when(time.time(),'t')} • Rate base: {s['enc_total']}")
+    emb.set_footer(text=f"Now {_fmt_when(time.time(),'t')} • Rate base: {s['enc_total']} • {VERSION}")
     return emb
 
 class SummaryView(View):
@@ -124,7 +126,7 @@ class SummaryView(View):
         self.mode = "shiny" if self.mode == "catch" else "catch"
         await interaction.response.edit_message(embed=build_embed(self.mode), view=self)
 
-# CSV export (slash command roept deze helper aan)
+# CSV export (werkt met followup na defer)
 async def export_csv(interaction: discord.Interaction):
     rows = last_24h()
     buf = io.StringIO()
@@ -139,7 +141,7 @@ async def export_csv(interaction: discord.Interaction):
             _fmt_iv(iv)
         ])
     data = buf.getvalue().encode()
-    await interaction.response.send_message(
+    await interaction.followup.send(
         file=discord.File(io.BytesIO(data), filename="pxstats_last24h.csv"),
         ephemeral=True
     )
