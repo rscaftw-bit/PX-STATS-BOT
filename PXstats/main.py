@@ -1,5 +1,5 @@
 # main.py
-VERSION = "main-v3.3 • 2025-11-09 (pairing 10s)"
+VERSION = "main-v3.4 • 2025-11-09 (pairing+shiny-log)"
 
 import os, time, asyncio, datetime, discord
 from discord import app_commands
@@ -38,6 +38,8 @@ def _battle_recent_for(name: str, now_ts: float) -> str | None:
 
 def _push_battle(name: str, kind: str, ts: float):
     """Sla battle event op voor pairing; voorkom dubbele 'raid/maxbattle' spam."""
+    if not name:
+        return False
     # Als exact dezelfde battle (naam+kind) al net kwam binnen 10s, negeren
     if _battle_recent_for(name, ts) == kind:
         return False
@@ -60,14 +62,12 @@ async def on_message(m: discord.Message):
         ts = m.created_at.timestamp()
         name = (p or {}).get("name") or ""
 
-        # 1) Battle types: onthouden voor pairing (10s)
+        # 1) Battle types: onthouden voor pairing (10s), en 1x loggen
         if evt == "Raid":
             if _push_battle(name, "raid", ts):
-                # tel raid encounter één keer
                 add_event("Encounter", {"name": name, "source": "raid"}, ts)
                 add_event("Raid", {"name": name}, ts)
                 wrote = True
-            # Als duplicate binnen 10s: sla over
             continue
 
         if evt == "MaxBattle":
@@ -77,33 +77,33 @@ async def on_message(m: discord.Message):
                 wrote = True
             continue
 
-        # 2) Encounter van wild/quest/rocket: skippen indien net gepaird met battle
+        # 2) Encounter wild/quest/rocket: skippen als er net een battle-pairing was
         if evt == "Encounter":
             paired_kind = _battle_recent_for(name, ts)
             if paired_kind:
-                # Laat Encounter die enkel het battle-event duidt weg
-                # (Raid/MaxBattle hierboven hebben zelf al een Encounter entry toegevoegd)
+                # raid/maxbattle hierboven voegen zelf al Encounter toe
                 continue
             add_event("Encounter", p, ts)
             wrote = True
             continue
 
-        # 3) Shiny: telt als Catch + Shiny
+        # 3) Shiny: ALTIJD Catch + Shiny loggen (met shiny=True vlag) + console-log
         if evt == "Shiny":
-            # koppelen mag, maar Catch blijft meetellen (doel = 1 Raid + 1 Catch)
+            p = p or {}
+            p["shiny"] = True
+            print(f"[SHINY] {p.get('name')} IV {p.get('iv')} • ts={int(ts)}")
             add_event("Catch", p, ts)
             add_event("Shiny", p, ts)
             wrote = True
             continue
 
-        # 4) Catch: koppelen aan battle indien aanwezig (geen extra Encounter nodig)
+        # 4) Catch: gewone vangst (pairing vermijdt al dubbele encounter events)
         if evt == "Catch":
-            # geen extra logic nodig; pairing vermijdt al dubbele encounter events
             add_event("Catch", p, ts)
             wrote = True
             continue
 
-        # 5) Overige types direct loggen
+        # 5) Overigen rechtstreeks loggen (Quest/Rocket/Hatch/Fled, etc.)
         add_event(evt, p, ts)
         wrote = True
 
@@ -195,4 +195,5 @@ if __name__ == "__main__":
     if not DISCORD_TOKEN:
         raise SystemExit("❌ DISCORD_TOKEN ontbreekt")
     start_keepalive()
+    print("[INIT] PXstats main.py loaded •", VERSION)
     client.run(DISCORD_TOKEN)
