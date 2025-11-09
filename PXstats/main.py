@@ -1,12 +1,12 @@
 # main.py
-VERSION = "main-v3.4 • 2025-11-09 (pairing+shiny-log)"
+VERSION = "main-v3.5 • 2025-11-09 (pairing+shiny-log+download)"
 
-import os, time, asyncio, datetime, discord
+import os, io, json, time, asyncio, datetime, discord
 from discord import app_commands
 from collections import deque
 
 from utils import (
-    start_keepalive, load_events, save_events, EVENTS, TZ, add_event
+    start_keepalive, load_events, save_events, EVENTS, TZ, add_event, SAVE_PATH
 )
 from parser import parse_polygonx_embed
 from stats import build_embed, SummaryView, export_csv
@@ -17,7 +17,6 @@ GUILD_ID = os.getenv("GUILD_ID")  # optional
 
 # ---------------- Pairing config ----------------
 PAIR_WINDOW_SEC = 10  # Catch binnen 10s na Raid/MaxBattle = gepaird
-# Bewaar de laatste "battle encounters" per naam
 RECENT_BATTLES = deque(maxlen=200)  # items: (ts, name, kind) kind in {"raid","maxbattle"}
 
 intents = discord.Intents.default()
@@ -27,7 +26,6 @@ tree = app_commands.CommandTree(client)
 
 
 def _battle_recent_for(name: str, now_ts: float) -> str | None:
-    """Return 'raid'/'maxbattle' als er binnen window een battle van dezelfde naam was."""
     if not name:
         return None
     for (ts, nm, kind) in reversed(RECENT_BATTLES):
@@ -37,10 +35,8 @@ def _battle_recent_for(name: str, now_ts: float) -> str | None:
 
 
 def _push_battle(name: str, kind: str, ts: float):
-    """Sla battle event op voor pairing; voorkom dubbele 'raid/maxbattle' spam."""
     if not name:
         return False
-    # Als exact dezelfde battle (naam+kind) al net kwam binnen 10s, negeren
     if _battle_recent_for(name, ts) == kind:
         return False
     RECENT_BATTLES.append((ts, name, kind))
@@ -62,7 +58,7 @@ async def on_message(m: discord.Message):
         ts = m.created_at.timestamp()
         name = (p or {}).get("name") or ""
 
-        # 1) Battle types: onthouden voor pairing (10s), en 1x loggen
+        # 1) Battle types
         if evt == "Raid":
             if _push_battle(name, "raid", ts):
                 add_event("Encounter", {"name": name, "source": "raid"}, ts)
@@ -77,17 +73,15 @@ async def on_message(m: discord.Message):
                 wrote = True
             continue
 
-        # 2) Encounter wild/quest/rocket: skippen als er net een battle-pairing was
+        # 2) Encounter wild/quest/rocket
         if evt == "Encounter":
-            paired_kind = _battle_recent_for(name, ts)
-            if paired_kind:
-                # raid/maxbattle hierboven voegen zelf al Encounter toe
+            if _battle_recent_for(name, ts):
                 continue
             add_event("Encounter", p, ts)
             wrote = True
             continue
 
-        # 3) Shiny: ALTIJD Catch + Shiny loggen (met shiny=True vlag) + console-log
+        # 3) Shiny => Catch(shiny=True) + Shiny
         if evt == "Shiny":
             p = p or {}
             p["shiny"] = True
@@ -97,13 +91,13 @@ async def on_message(m: discord.Message):
             wrote = True
             continue
 
-        # 4) Catch: gewone vangst (pairing vermijdt al dubbele encounter events)
+        # 4) Catch
         if evt == "Catch":
             add_event("Catch", p, ts)
             wrote = True
             continue
 
-        # 5) Overigen rechtstreeks loggen (Quest/Rocket/Hatch/Fled, etc.)
+        # 5) Overige
         add_event(evt, p, ts)
         wrote = True
 
@@ -154,6 +148,61 @@ async def reload_cmd(inter: discord.Interaction):
     load_events()
     _load_pokedex()
     await inter.followup.send("🔄 Pokédex en events opnieuw geladen!", ephemeral=True)
+
+
+# --------- NIEUW: events.json downloaden ----------
+@tree.command(name="download_events", description="Download events.json als bestand (ephemeral).")
+async def download_events(i: discord.Interaction):
+    try:
+        await i.response.defer(ephemeral=True, thinking=False)
+    except discord.InteractionResponded:
+        pass
+
+    # Lees file indien aanwezig, anders maak JSON vanuit memory
+    payload = None
+    if os.path.exists(SAVE_PATH):
+        try:
+            with open(SAVE_PATH, "rb") as f:
+                payload = f.read()
+        except Exception as e:
+            print("[DOWNLOAD ERR] reading file:", e)
+
+    if payload is None:
+        try:
+            payload = json.dumps(list(EVENTS), ensure_ascii=False).encode()
+        except Exception as e:
+            await i.followup.send(f"⚠️ Kon events niet serialiseren: {e}", ephemeral=True)
+            return
+
+    await i.followup.send(
+        file=discord.File(io.BytesIO(payload), filename="events.json"),
+        ephemeral=True
+    )
+
+# --------- NIEUW: recente shinies ----------
+@tree.command(name="recent_shinies", description="Toon de laatste shinies (default 10).")
+@app_commands.describe(limit="Aantal regels (max 50)")
+async def recent_shinies(i: discord.Interaction, limit: int = 10):
+    try:
+        await i.response.defer(ephemeral=True, thinking=False)
+    except discord.InteractionResponded:
+        pass
+    limit = max(1, min(50, limit))
+    rows = list(EVENTS)
+    shinies = [r for r in rows if r["type"] == "Shiny" or (r["type"] == "Catch" and r["data"].get("shiny"))]
+    shinies.sort(key=lambda x: x["ts"], reverse=True)
+    shinies = shinies[:limit]
+    if not shinies:
+        await i.followup.send("Geen shinies gevonden in de huidige logs.", ephemeral=True)
+        return
+
+    def fmt(r):
+        name = r["data"].get("name","?")
+        iv   = r["data"].get("iv")
+        ivs  = f" {iv[0]}/{iv[1]}/{iv[2]}" if isinstance(iv, (list, tuple)) and len(iv) == 3 else ""
+        return f"✨ {name}{ivs} • <t:{int(r['ts'])}:f>"
+    msg = "\n".join(fmt(r) for r in shinies)
+    await i.followup.send(msg, ephemeral=True)
 
 
 # --------- DAILY SUMMARY LOOP ----------
