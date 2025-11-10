@@ -32,6 +32,16 @@ def parse_polygonx_embed(e: discord.Embed) -> Tuple[Optional[str], dict]:
         "level": None
     }
 
+    # ===== Pokédex ID-mapping =====
+    from PXstats.pokedex import get_name_from_id
+    import re
+
+    if data["name"]:
+        match = re.match(r"p\s*(\d+)", data["name"].strip(), re.IGNORECASE)
+        if match:
+            pid = int(match.group(1))
+            data["name"] = get_name_from_id(pid)
+
     # Shiny detection
     shiny_triggers = [" shiny", "✨", "⭐", "★", "🌟"]
     if any(t in full.lower() for t in shiny_triggers):
