@@ -68,10 +68,15 @@ async def on_message(m: discord.Message):
         ts = m.created_at.timestamp()
         title_l = (e.title or "").lower()
 
-        # Shiny handling
-        if evt == "Shiny" and ("caught" in title_l or "caught successfully" in title_l):
-            add_event("Catch", p, ts)
-            rec += 1
+	# Shiny handling (double log: Catch + Shiny)
+	if evt == "Shiny":
+    	p = p or {}
+    	p["shiny"] = True
+    	add_event("Catch", p, ts)
+    	add_event("Shiny", p, ts)
+    	rec += 2
+    	continue
+
 
         # Quest / Raid / Rocket / MaxBattle get Encounter flag too
         if evt in {"Quest", "Raid", "Rocket", "MaxBattle"}:
