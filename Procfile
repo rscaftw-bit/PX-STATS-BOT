@@ -1,1 +1,1 @@
-web: python PXstats/main.py
+web: python PXstats/main
