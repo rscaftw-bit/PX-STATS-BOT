@@ -26,6 +26,8 @@ from PXstats.utils import (
     last_24h, add_event, load_events, save_events, EVENTS,
     load_pokedex, TZ  # TZ from utils (defaults to Europe/Brussels)
 )
+
+# ===== Pokédex test & logging =====
 print("=== PXstats startup initiated ===")
 
 try:
@@ -34,6 +36,7 @@ try:
     print(f"[INIT] Pokédex geladen: {len(pokedex)} entries")
 except Exception as e:
     print(f"[ERROR] Pokédex kon niet geladen worden: {e}")
+
 
 # ===== Discord setup =====
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
