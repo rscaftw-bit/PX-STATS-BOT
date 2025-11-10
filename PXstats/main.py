@@ -1,12 +1,19 @@
 # =========================================================
-# PXstats • main-v3.8 • 2025-11-10
-# Includes: (fix) build_embed(rows), improved /summary handling
+# PXstats • main-v3.8.3 • 2025-11-10
+# Fixes:
+# - build_embed(rows) everywhere
+# - /summary defers to avoid Unknown interaction
+# - Shiny => double log (Catch + Shiny) with data["shiny"]=True
+# - Encounter pairing for Quest/Raid/Rocket/MaxBattle
+# - Keepalive answers GET + HEAD (no 501)
+# - Pokedex failsafe: always expand to 1..1025 and map "p###"
 # =========================================================
 
-import os, time, threading, asyncio
+import os, re, time, threading, asyncio, json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Dict, Any
 
 import discord
 from discord import app_commands
@@ -15,14 +22,15 @@ from discord.ui import View, Button
 # ===== Imports from PXstats modules =====
 from PXstats.parser import parse_polygonx_embed
 from PXstats.stats import build_embed
-from PXstats.utils import last_24h
-from PXstats.utils import add_event, load_events, save_events, EVENTS, load_pokedex
+from PXstats.utils import (
+    last_24h, add_event, load_events, save_events, EVENTS,
+    load_pokedex, TZ  # TZ from utils (defaults to Europe/Brussels)
+)
 
 # ===== Discord setup =====
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0")) or None
 GUILD_ID = int(os.getenv("GUILD_ID", "0")) or None
-TZ = ZoneInfo("Europe/Brussels")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -30,6 +38,50 @@ intents.guilds = True
 
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
+
+# ======== POKEDEX FAILSAFE ========
+_POKEDEX: Dict[str, str] = {}
+_POKEDEX_PATH = os.path.join(os.path.dirname(__file__), "pokedex.json")
+
+def _ensure_full_pokedex() -> None:
+    """Load current pokedex and make sure we have entries 1..1025 (placeholders if missing)."""
+    global _POKEDEX
+    _POKEDEX = load_pokedex() or {}
+    changed = False
+    # Backfill placeholders for any missing id
+    for i in range(1, 1026):
+        k = str(i)
+        if k not in _POKEDEX or not _POKEDEX.get(k):
+            _POKEDEX[k] = f"Pokemon {i}"
+            changed = True
+    if changed:
+        try:
+            with open(_POKEDEX_PATH, "w", encoding="utf-8") as f:
+                json.dump(_POKEDEX, f, ensure_ascii=False, indent=2)
+            print(f"[POKEDEX] expanded to {len(_POKEDEX)} entries")
+        except Exception as e:
+            print("[POKEDEX SAVE ERR]", e)
+
+_PNUM = re.compile(r"(?i)^\s*p\s*(\d{1,4})\s*$")
+
+def _dex_name_safe(name: str) -> str:
+    """Map 'p###' to a readable name using our in-memory pokedex; fallback to 'Pokemon ###'."""
+    if not name:
+        return "?"
+    s = str(name).strip()
+    m = _PNUM.match(s)
+    if m:
+        n = m.group(1).lstrip("0") or "0"
+        return _POKEDEX.get(n, f"Pokemon {n}")
+    return s
+
+def _normalize_name_in_event(data: Dict[str, Any]) -> Dict[str, Any]:
+    if not data:
+        return {}
+    nm = data.get("name")
+    if isinstance(nm, str):
+        data["name"] = _dex_name_safe(nm.replace("(", "").replace(")", "").strip())
+    return data
 
 # ===== Keepalive server (Render requirement) =====
 class _Healthz(BaseHTTPRequestHandler):
@@ -39,15 +91,9 @@ class _Healthz(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"OK")
 
-    def do_GET(self):
-        self._ok()
-
-    def do_HEAD(self):
-        self._ok()
-
-    def log_message(self, *args, **kwargs):
-        return
-
+    def do_GET(self):  self._ok()
+    def do_HEAD(self): self._ok()
+    def log_message(self, *args, **kwargs): return
 
 def start_keepalive():
     port = int(os.getenv("PORT", "10000"))
@@ -66,18 +112,17 @@ async def on_message(m: discord.Message):
         if not evt:
             continue
         ts = m.created_at.timestamp()
+        p = _normalize_name_in_event(p or {})
         title_l = (e.title or "").lower()
 
         # Shiny handling (double log: Catch + Shiny)
         if evt == "Shiny":
-            p = p or {}
             p["shiny"] = True
-            add_event("Catch", p, ts)
-            add_event("Shiny", p, ts)
-            rec += 2
+            add_event("Catch", p, ts); rec += 1
+            add_event("Shiny", p, ts); rec += 1
             continue
 
-        # Quest / Raid / Rocket / MaxBattle get Encounter flag too
+        # Quest / Raid / Rocket / MaxBattle -> also log an Encounter(source=...)
         if evt in {"Quest", "Raid", "Rocket", "MaxBattle"}:
             src = (
                 "quest" if evt == "Quest"
@@ -85,15 +130,13 @@ async def on_message(m: discord.Message):
                 else "rocket" if evt == "Rocket"
                 else "maxbattle"
             )
-            add_event("Encounter", {"name": p.get("name"), "source": src}, ts)
-            rec += 1
+            add_event("Encounter", {"name": p.get("name"), "source": src}, ts); rec += 1
 
-        add_event(evt, p, ts)
-        rec += 1
+        # Always log the base event
+        add_event(evt, p, ts); rec += 1
 
     if rec:
         print(f"[INGEST] processed embeds from {m.author} ({rec} events)")
-
 
 # ===== Backfill from history =====
 async def backfill_from_channel(limit=500):
@@ -108,10 +151,14 @@ async def backfill_from_channel(limit=500):
             if not evt:
                 continue
             ts = m.created_at.timestamp()
+            p = _normalize_name_in_event(p or {})
             title_l = (e.title or "").lower()
 
-            if evt == "Shiny" and ("caught" in title_l or "caught successfully" in title_l):
+            if evt == "Shiny":
+                p["shiny"] = True
                 add_event("Catch", p, ts)
+                add_event("Shiny", p, ts)
+                continue
 
             if evt in {"Quest", "Raid", "Rocket", "MaxBattle"}:
                 src = (
@@ -135,28 +182,38 @@ class SummaryView(View):
     async def refresh(self, i: discord.Interaction, b: Button):
         try:
             await i.response.edit_message(embed=build_embed(last_24h(), self.mode), view=self)
+        except discord.InteractionResponded:
+            await i.edit_original_response(embed=build_embed(last_24h(), self.mode), view=self)
         except Exception as e:
-            await i.followup.send(f"Refresh failed: {e}", ephemeral=True)
+            try:    await i.followup.send(f"Refresh failed: {e}", ephemeral=True)
+            except: pass
 
     @discord.ui.button(label="Rate: Catch", style=discord.ButtonStyle.secondary)
     async def toggle(self, i: discord.Interaction, b: Button):
         self.mode = "shiny" if self.mode == "catch" else "catch"
         b.label = "Rate: Shiny" if self.mode == "shiny" else "Rate: Catch"
-        await i.response.edit_message(embed=build_embed(last_24h(), self.mode), view=self)
+        try:
+            await i.response.edit_message(embed=build_embed(last_24h(), self.mode), view=self)
+        except discord.InteractionResponded:
+            await i.edit_original_response(embed=build_embed(last_24h(), self.mode), view=self)
 
 # ===== /summary command =====
 @tree.command(name="summary", description="Toon de 24u stats met refresh en toggle")
 async def summary(inter: discord.Interaction):
+    # Defer to avoid 10062 Unknown interaction
     try:
-        await inter.response.send_message("📊 Summary geplaatst.", ephemeral=True)
-    except Exception as e:
-        print("[WARN] Ephemeral send failed:", e)
+        await inter.response.defer(ephemeral=True, thinking=False)
+    except discord.InteractionResponded:
+        pass
     ch = client.get_channel(CHANNEL_ID) or inter.channel
     await ch.send(embed=build_embed(last_24h()), view=SummaryView())
+    try:
+        await inter.followup.send("📊 Summary geplaatst.", ephemeral=True)
+    except Exception:
+        pass
 
 # ===== Daily summary at 00:05 =====
 _last_daily_key = None
-
 async def daily_summary_loop():
     global _last_daily_key
     await client.wait_until_ready()
@@ -181,15 +238,23 @@ async def daily_summary_loop():
 async def on_ready():
     print(f"[READY] {client.user}")
     try:
+        # Slash commands
         if GUILD_ID:
             await tree.sync(guild=discord.Object(id=GUILD_ID))
         else:
             await tree.sync()
+
+        # Presence
         await client.change_presence(status=discord.Status.online, activity=discord.Game("PXstats · /summary"))
-        load_pokedex()
+
+        # Pokedex + events
+        _ensure_full_pokedex()
         load_events()
+
+        # Backfill & daily summary
         await backfill_from_channel(limit=500)
         client.loop.create_task(daily_summary_loop())
+
         print("[INIT] Bot is actief en volledig geladen.")
     except Exception as er:
         print("[READY ERROR]", er)
