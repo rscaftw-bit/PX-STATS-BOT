@@ -201,25 +201,24 @@ class SummaryView(View):
 @tree.command(name="summary", description="Toont de samenvatting van de laatste 24 uur")
 async def summary(inter: discord.Interaction):
     try:
-        # Defer direct en toon 'aan het denken...'
+        # Defert onmiddellijk om timeout te vermijden
         await inter.response.defer(ephemeral=False, thinking=True)
 
-        # Bouw embed
+        # Bouw de embed
         embed = build_embed(last_24h())
 
-        # Antwoord via followup (niet opnieuw via response!)
+        # Antwoord via followup (na defer mag enkel dit)
         await inter.followup.send(embed=embed)
 
     except discord.errors.NotFound:
-        print("[WARNING] Interaction expired before defer() — trying followup directly.")
+        print("[WARNING] Interaction expired before defer() — fallback naar kanaal.")
         try:
             embed = build_embed(last_24h())
             await inter.channel.send(embed=embed)
         except Exception as e:
-            print(f"[ERROR] Could not send summary embed: {e}")
+            print(f"[ERROR] Kon summary niet posten: {e}")
     except Exception as e:
         print(f"[ERROR] Summary command failed: {e}")
-
 
 # ===== Daily summary at 00:05 =====
 _last_daily_key = None
