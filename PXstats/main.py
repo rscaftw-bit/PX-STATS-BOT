@@ -33,15 +33,21 @@ tree = app_commands.CommandTree(client)
 
 # ===== Keepalive server (Render requirement) =====
 class _Healthz(BaseHTTPRequestHandler):
+    def _ok(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
     def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"PXstats bot running - OK")
+        self._ok()
+
     def do_HEAD(self):
-        self.send_response(200)
-        self.end_headers()
-    def log_message(self, *a, **k):
+        self._ok()
+
+    def log_message(self, *args, **kwargs):
         return
+
 
 def start_keepalive():
     port = int(os.getenv("PORT", "10000"))
