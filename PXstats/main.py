@@ -68,15 +68,14 @@ async def on_message(m: discord.Message):
         ts = m.created_at.timestamp()
         title_l = (e.title or "").lower()
 
-	# Shiny handling (double log: Catch + Shiny)
-	if evt == "Shiny":
-    	p = p or {}
-    	p["shiny"] = True
-    	add_event("Catch", p, ts)
-    	add_event("Shiny", p, ts)
-    	rec += 2
-    	continue
-
+        # Shiny handling (double log: Catch + Shiny)
+        if evt == "Shiny":
+            p = p or {}
+            p["shiny"] = True
+            add_event("Catch", p, ts)
+            add_event("Shiny", p, ts)
+            rec += 2
+            continue
 
         # Quest / Raid / Rocket / MaxBattle get Encounter flag too
         if evt in {"Quest", "Raid", "Rocket", "MaxBattle"}:
@@ -94,6 +93,7 @@ async def on_message(m: discord.Message):
 
     if rec:
         print(f"[INGEST] processed embeds from {m.author} ({rec} events)")
+
 
 # ===== Backfill from history =====
 async def backfill_from_channel(limit=500):
