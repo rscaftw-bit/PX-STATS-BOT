@@ -198,19 +198,28 @@ class SummaryView(View):
             await i.edit_original_response(embed=build_embed(last_24h(), self.mode), view=self)
 
 # ===== /summary command =====
-@tree.command(name="summary", description="Toon de 24u stats met refresh en toggle")
+@tree.command(name="summary", description="Toont de samenvatting van de laatste 24 uur")
 async def summary(inter: discord.Interaction):
-    # Defer to avoid 10062 Unknown interaction
     try:
-        await inter.response.defer(ephemeral=True, thinking=False)
-    except discord.InteractionResponded:
-        pass
-    ch = client.get_channel(CHANNEL_ID) or inter.channel
-    await ch.send(embed=build_embed(last_24h()), view=SummaryView())
-    try:
-        await inter.followup.send("📊 Summary geplaatst.", ephemeral=True)
-    except Exception:
-        pass
+        # Defer direct en toon 'aan het denken...'
+        await inter.response.defer(ephemeral=False, thinking=True)
+
+        # Bouw embed
+        embed = build_embed(last_24h())
+
+        # Antwoord via followup (niet opnieuw via response!)
+        await inter.followup.send(embed=embed)
+
+    except discord.errors.NotFound:
+        print("[WARNING] Interaction expired before defer() — trying followup directly.")
+        try:
+            embed = build_embed(last_24h())
+            await inter.channel.send(embed=embed)
+        except Exception as e:
+            print(f"[ERROR] Could not send summary embed: {e}")
+    except Exception as e:
+        print(f"[ERROR] Summary command failed: {e}")
+
 
 # ===== Daily summary at 00:05 =====
 _last_daily_key = None
