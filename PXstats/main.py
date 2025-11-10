@@ -14,7 +14,8 @@ from discord.ui import View, Button
 
 # ===== Imports from PXstats modules =====
 from PXstats.parser import parse_polygonx_embed
-from PXstats.stats import build_embed, last_24h
+from PXstats.stats import build_embed
+from PXstats.utils import last_24h
 from PXstats.utils import add_event, load_events, save_events, EVENTS, load_pokedex
 
 # ===== Discord setup =====
