@@ -52,11 +52,19 @@ def parse_polygonx_embed(e: discord.Embed) -> Tuple[Optional[str], dict]:
 
     # ===== Pokédex ID → Name mapping =====
     from PXstats.pokedex import get_name_from_id
+    import re
+
     if data["name"]:
-        match = re.search(r"\bp\s*(\d+)\b", data["name"], re.IGNORECASE)
-        if match:
-            pid = int(match.group(1))
-            data["name"] = get_name_from_id(pid)
+        raw_name = data["name"].strip().lower()
+
+        # vangt p###, p ###, p785:3130:0:3, etc.
+        pid_match = re.search(r"p\s*0*([0-9]{1,4})(?::|$|\s)", raw_name, re.IGNORECASE)
+        if pid_match:
+            pid = int(pid_match.group(1))
+            resolved = get_name_from_id(pid)
+            print(f"[Pokédex-map] {data['name']} → {resolved}")  # debug
+            data["name"] = resolved
+
 
     # ===== Shiny detection =====
     shiny_triggers = [" shiny", "✨", "⭐", "★", "🌟"]
