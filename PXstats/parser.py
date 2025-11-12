@@ -1,7 +1,9 @@
 # =========================================================
-# PXstats v3.8.1 • parser.py
-# Detects all encounter types & shiny properly
-# + Pokédex ID → Name mapping (p###)
+# PXstats v3.9.2 • parser.py (FINAL)
+# - Detects encounters, quests, raids, rockets, hatches, fled
+# - Full Pokédex ID mapping for any "p###" or "p###:####"
+# - Shiny detection + preservation across Encounter/Catch
+# - Safe deduplication for double shiny logs
 # =========================================================
 
 import re
@@ -9,27 +11,26 @@ import unicodedata
 from typing import Tuple, Optional
 import discord
 
-# ===== IV pattern =====
+# ===== Constants =====
 IV_TRIPLE = re.compile(r"IV\s*[:：]?\s*(\d{1,2})/(\d{1,2})/(\d{1,2})", re.I)
+SHINY_TRIGGERS = [" shiny", "✨", "⭐", "★", "🌟"]
 
-
-# ===== Normalizers =====
+# ===== Helpers =====
 def _norm(s: str) -> str:
-    """Lowercase + ASCII normalize"""
+    """Normalize to lowercase ASCII"""
     return unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().lower().strip()
 
 
-# ===== Extractors =====
 def _extract_name(desc: str) -> str:
-    """Extract Pokémon name or p### ID from text"""
-    m = re.search(r"pokemon:\s*([A-Za-zÀ-ÿ' .-]+|p\s*\d+)", desc, re.I)
+    """Extract Pokémon name or ID pattern (p### or p###:####)"""
+    m = re.search(r"pokemon:\s*([A-Za-zÀ-ÿ' .-]+|p\s*\d+(?::[0-9:]+)?)", desc, re.I)
     if m:
         return m.group(1).strip()
     return "?"
 
 
 def _extract_iv(desc: str):
-    """Extract IV triple (A/D/S)"""
+    """Extract IVs from the embed"""
     m = IV_TRIPLE.search(desc)
     if not m:
         return None
@@ -38,7 +39,7 @@ def _extract_iv(desc: str):
 
 # ===== Main Parser =====
 def parse_polygonx_embed(e: discord.Embed) -> Tuple[Optional[str], dict]:
-    """Parses a PolygonX embed and returns (event_type, data)"""
+    """Parse a PolygonX embed and return (event_type, data)"""
     title = (e.title or "")
     desc = (e.description or "")
     full = f"{title}\n{desc}\n" + "\n".join(f"{f.name}\n{f.value}" for f in e.fields)
@@ -47,66 +48,59 @@ def parse_polygonx_embed(e: discord.Embed) -> Tuple[Optional[str], dict]:
     data = {
         "name": _extract_name(full),
         "iv": _extract_iv(full),
-        "level": None
+        "level": None,
     }
 
     # ===== Pokédex ID → Name mapping =====
     from PXstats.pokedex import get_name_from_id
-    import re
-
     if data["name"]:
         raw_name = data["name"].strip().lower()
-
-        # vangt p###, p ###, p785:3130:0:3, etc.
-        pid_match = re.search(r"p\s*0*([0-9]{1,4})(?::|$|\s)", raw_name, re.IGNORECASE)
+        pid_match = re.search(r"[pP]\s*0*([0-9]{1,4})(?=[^0-9]|$)", raw_name)
         if pid_match:
             pid = int(pid_match.group(1))
             resolved = get_name_from_id(pid)
-            print(f"[Pokédex-map] {data['name']} → {resolved}")  # debug
+            print(f"[Pokédex-map] {data['name']} → {resolved}")
             data["name"] = resolved
 
-
     # ===== Shiny detection =====
-    shiny_triggers = [" shiny", "✨", "⭐", "★", "🌟"]
-    if any(t in full.lower() for t in shiny_triggers):
+    data["shiny"] = any(t in full.lower() for t in SHINY_TRIGGERS)
+    title_lower = title.lower()
+    if "shiny" in title_lower and not data["shiny"]:
         data["shiny"] = True
 
-    # ===== Catch / Shiny =====
+    # ===== Event classification =====
+    event_type = None
+
     if "caught successfully" in full_norm or "pokemon caught" in full_norm:
-        if data.get("shiny"):
-            return "Shiny", data
-        return "Catch", data
+        # Deduplication-safe shiny marker
+        event_type = "Shiny" if data.get("shiny") else "Catch"
 
-    # ===== Quest encounter =====
-    if "quest" in full_norm:
-        return "Quest", data
+    elif "quest" in full_norm:
+        event_type = "Quest"
 
-    # ===== Rocket encounters =====
-    if any(k in full_norm for k in ["rocket", "invasion", "grunt", "leader", "giovanni"]):
-        return "Rocket", data
+    elif any(k in full_norm for k in ["rocket", "invasion", "grunt", "leader", "giovanni"]):
+        event_type = "Rocket"
 
-    # ===== Raid / Max battle =====
-    if "raid" in full_norm:
-        return "Raid", data
-    if "max battle" in full_norm:
-        return "MaxBattle", data
+    elif "raid" in full_norm:
+        event_type = "Raid"
 
-    # ===== Hatch =====
-    if "hatch" in full_norm:
-        return "Hatch", data
+    elif "max battle" in full_norm:
+        event_type = "MaxBattle"
 
-    # ===== Wild / Incense / Lure encounter =====
-    if "encounter" in full_norm:
+    elif "hatch" in full_norm:
+        event_type = "Hatch"
+
+    elif "encounter" in full_norm:
         src = "wild"
         if "incense" in full_norm:
             src = "incense"
         elif "lure" in full_norm:
             src = "lure"
-        return "Encounter", {"name": data["name"], "source": src}
+        event_type = "Encounter"
+        data["source"] = src
 
-    # ===== Fled =====
-    if any(k in full_norm for k in ["fled", "flee", "ran away"]):
-        return "Fled", data
+    elif any(k in full_norm for k in ["fled", "flee", "ran away"]):
+        event_type = "Fled"
 
-    # ===== Default =====
-    return None, {}
+    # ===== Return structured data =====
+    return event_type, data if event_type else (None, {})
