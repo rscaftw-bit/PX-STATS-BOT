@@ -1,192 +1,204 @@
-# =========================================================
-# PXstats • main.py • v3.9.3 (FINAL)
-# =========================================================
+# ======================================================
+# PXstats • main.py • 2025-11-13
+# Clean, stable, fixed release
+# ======================================================
 
 import os
 import json
-import threading
+import asyncio
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
 
 import discord
 from discord import app_commands
-from discord.ui import View, Button
 
-# PXstats modules
 from PXstats.parser import parse_polygonx_embed
-from PXstats.stats import build_embed, make_csv_rows
+from PXstats.stats import build_embed
 from PXstats.utils import (
-    EVENTS, add_event, load_events, save_events,
-    last_24h, TZ
+    load_events, save_events, add_event, EVENTS, TZ, load_pokedex
 )
 
-print("=== PXstats STARTUP ===")
 
-# Load existing events
-load_events()
+# ======================================================
+# STARTUP
+# ======================================================
 
-# Load Pokédex (full file)
+print("=== PXstats startup initiated ===")
+
 try:
-    from PXstats.pokedex import load_pokedex
-    pok = load_pokedex()
-    print(f"[INIT] Pokédex loaded: {len(pok)} entries")
+    pokedex = load_pokedex()
+    print(f"[INIT] Pokédex geladen: {len(pokedex)} entries")
 except Exception as e:
-    print(f"[ERROR] Failed loading Pokédex: {e}")
+    print(f"[ERROR] Pokédex kon niet geladen worden: {e}")
 
-# ---------------------------------------------------------
-# Discord setup
-# ---------------------------------------------------------
 
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 GUILD_ID = int(os.getenv("GUILD_ID", "0")) or None
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0")) or None
 
 intents = discord.Intents.default()
 intents.message_content = True
-client = discord.Client(intents=intents)
-tree = app_commands.CommandTree(client)
+
+bot = discord.Client(intents=intents)
+tree = app_commands.CommandTree(bot)
 
 
-# ---------------------------------------------------------
-# Keep-alive tiny webserver (GET/HEAD only)
-# ---------------------------------------------------------
+# ======================================================
+# KEEP-ALIVE SERVER (Render)
+# ======================================================
 
-class PingHandler(BaseHTTPRequestHandler):
+class KeepAlive(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
 
     def do_HEAD(self):
         self.send_response(200)
         self.end_headers()
 
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"PXstats OK")
 
-    def log_message(self, *args):
-        return  # keep console clean
-
-
-def run_keepalive():
-    port = int(os.getenv("PORT", "8080"))
-    server = HTTPServer(("0.0.0.0", port), PingHandler)
-    print(f"[KEEPALIVE] Running at :{port}")
+def start_server():
+    server = HTTPServer(("0.0.0.0", 10000), KeepAlive)
     server.serve_forever()
 
 
-threading.Thread(target=run_keepalive, daemon=True).start()
+threading.Thread(target=start_server, daemon=True).start()
 
 
-# ---------------------------------------------------------
-# Utility
-# ---------------------------------------------------------
+# ======================================================
+# DISCORD READY
+# ======================================================
 
-def safe_filename(s: str) -> str:
-    return "".join(c for c in s if c.isalnum() or c in "-_ ").strip()
+@bot.event
+async def on_ready():
+    print(f"[READY] Logged in as {bot.user}")
 
-
-# ---------------------------------------------------------
-# Slash Commands
-# ---------------------------------------------------------
-
-@tree.command(name="summary", description="Show today's stats (last 24h)")
-async def summary_cmd(interaction: discord.Interaction):
-
-    await interaction.response.defer(ephemeral=True, thinking=False)
-
-    rows = last_24h()
-    emb = build_embed(rows)
-
-    await interaction.followup.send(embed=emb, ephemeral=True)
+    try:
+        if GUILD_ID:
+            guild = discord.Object(id=GUILD_ID)
+            tree.copy_global_to(guild=guild)
+            await tree.sync(guild=guild)
+            print("[SYNC] Commands gesynchroniseerd (guild)")
+        else:
+            await tree.sync()
+            print("[SYNC] Commands gesynchroniseerd (global)")
+    except Exception as e:
+        print(f"[SYNC ERROR] {e}")
 
 
-@tree.command(name="recent_shinies", description="Show last shiny Pokémon")
-async def recent_shinies(interaction: discord.Interaction):
+# ======================================================
+# INGEST FROM POLYGONX
+# ======================================================
 
-    await interaction.response.defer(ephemeral=True)
-
-    rows = last_24h()
-    shiny_rows = [e for e in rows if e["data"].get("shiny")]
-
-    if not shiny_rows:
-        await interaction.followup.send("Geen shiny gevonden in de laatste 24 uur.", ephemeral=True)
-        return
-
-    txt = "\n".join(
-        f"{e['data']['name']} {e['data']['iv'][0]}/{e['data']['iv'][1]}/{e['data']['iv'][2]} "
-        f"({datetime.fromtimestamp(e['ts'], TZ).strftime('%d %B %Y %H:%M')})"
-        for e in sorted(shiny_rows, key=lambda x: x["ts"], reverse=True)[:10]
-    )
-
-    await interaction.followup.send(f"✨ **Laatste shinies**:\n{txt}", ephemeral=True)
-
-
-@tree.command(name="csv", description="Download CSV van de laatste 24u")
-async def csv_cmd(interaction: discord.Interaction):
-
-    await interaction.response.defer(ephemeral=True)
-
-    rows = last_24h()
-    data = make_csv_rows(rows)
-
-    # Build CSV
-    header = "timestamp,type,name,iv,shiny,source\n"
-    lines = [header]
-    for r in data:
-        line = f"{r['timestamp']},{r['type']},{r['name']},{r['iv']},{r['shiny']},{r['source']}\n"
-        lines.append(line)
-
-    csv_data = "".join(lines).encode("utf-8")
-
-    await interaction.followup.send(
-        "📄 CSV van de laatste 24h:",
-        file=discord.File(fp=bytes(csv_data), filename="pxstats_24h.csv"),
-        ephemeral=True
-    )
-
-
-# ---------------------------------------------------------
-# Message Listener — ingest PolygonX / Spidey embeds
-# ---------------------------------------------------------
-
-@client.event
+@bot.event
 async def on_message(msg: discord.Message):
 
-    # ignore bot itself
-    if msg.author.id == client.user.id:
+    # Skip bot messages unless it's Spidey/PolygonX
+    if msg.author == bot.user:
         return
+
     if not msg.embeds:
         return
 
-    # Parse embeds
     processed = 0
 
     for e in msg.embeds:
-        ev_type, data = parse_polygonx_embed(e)
-        if ev_type:
-            add_event(ev_type, data)
-            processed += 1
+        etype, data = parse_polygonx_embed(e)
+        if not etype:
+            continue
 
-    if processed:
-        print(f"[INGEST] Processed {processed} event(s) from {msg.author}")
+        # timestamp based on embed time or now
+        ts = e.timestamp or datetime.now(TZ)
+        data["timestamp"] = ts
+        data["type"] = etype
+
+        # log shiny + catch
+        add_event(data)
+        processed += 1
+
+    if processed > 0:
+        print(f"[INGEST] processed embeds from {msg.author} ({processed} events)")
+        save_events()
 
 
-# ---------------------------------------------------------
-# Ready event
-# ---------------------------------------------------------
+# ======================================================
+# /summary
+# ======================================================
 
-@client.event
-async def on_ready():
-    print(f"[READY] Logged in as {client.user}")
+@tree.command(name="summary", description="Toon statistieken van de laatste 24h")
+async def summary_cmd(inter):
     try:
-        guild = discord.Object(id=GUILD_ID)
-        await tree.sync(guild=guild)
-        print(f"[SLASH] Synced in guild {GUILD_ID}")
+        await inter.response.defer(ephemeral=False, thinking=False)
+        embed = build_embed(EVENTS)
+        await inter.followup.send(embed=embed)
     except Exception as e:
-        print(f"[ERROR] Slash sync: {e}")
+        print("[SUMMARY ERROR]", e)
+        try:
+            await inter.followup.send("Er ging iets mis bij /summary.")
+        except:
+            pass
 
 
-# ---------------------------------------------------------
-# Run the bot
-# ---------------------------------------------------------
+# ======================================================
+# /recent_shinies
+# ======================================================
 
-client.run(DISCORD_TOKEN)
+@tree.command(name="recent_shinies", description="Toon de laatste 5 shinies")
+async def recent_shinies(inter):
+    try:
+        await inter.response.defer(ephemeral=False)
+        shinies = [e for e in EVENTS if e["type"] == "Shiny"][-5:]
+
+        if not shinies:
+            await inter.followup.send("Geen shinies gevonden in de logs.")
+            return
+
+        txt = "\n".join(
+            f"{e['name']} {e['iv'][0]}/{e['iv'][1]}/{e['iv'][2]} "
+            f"({e['timestamp'].strftime('%d %B %Y %H:%M')})"
+            for e in reversed(shinies)
+        )
+        await inter.followup.send(f"✨ **Laatste Shinies:**\n{txt}")
+
+    except Exception as e:
+        print("[SHINIES ERROR]", e)
+        await inter.followup.send("Fout bij ophalen van shinies.")
+
+
+# ======================================================
+# /csv EXPORT
+# ======================================================
+
+@tree.command(name="csv", description="Download volledige CSV-log")
+async def csv_export(inter):
+    try:
+        await inter.response.defer(ephemeral=True)
+
+        # Build CSV string
+        lines = [
+            "timestamp,type,name,iv0,iv1,iv2"
+        ]
+        for e in EVENTS:
+            iv0, iv1, iv2 = (e.get("iv") or [None, None, None])
+            line = f"{e['timestamp']},{e['type']},{e['name']},{iv0},{iv1},{iv2}"
+            lines.append(line)
+
+        content = "\n".join(lines)
+
+        await inter.followup.send(
+            file=discord.File(fp=bytes(content, "utf-8"), filename="pxstats.csv")
+        )
+
+    except Exception as e:
+        print("[CSV ERROR]", e)
+        await inter.followup.send("Fout bij CSV export.")
+
+
+# ======================================================
+# START BOT
+# ======================================================
+
+bot.run(DISCORD_TOKEN)
