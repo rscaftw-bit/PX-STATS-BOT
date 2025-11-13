@@ -1,29 +1,19 @@
 # ================================================================
 # PXstats – stats.py • v4.2 • 2025-11-13
-# Volledig gefixt + emoji + correcte tellerlogica
+# Tellers voor encounters/catches/shinies + breakdown + latest
 # ================================================================
 
 from datetime import datetime, timedelta
-from PXstats.utils import TZ, EVENTS
-
-# ------------------------------------------------
-# Add event
-# ------------------------------------------------
-def add_event(ev):
-    EVENTS.append(ev)
-
-def last_24h():
-    now = datetime.now(TZ)
-    return [e for e in EVENTS if (now - e["timestamp"]) <= timedelta(hours=24)]
-
-# ------------------------------------------------
-# Build embed
-# ------------------------------------------------
 import discord
 
-def build_embed(all_events):
+from PXstats.utils import TZ
 
-    rows = last_24h()
+
+def build_embed(all_events):
+    """Bouwt de /summary embed op basis van EVENTS list."""
+
+    now = datetime.now(TZ)
+    rows = [e for e in all_events if (now - e["timestamp"]) <= timedelta(hours=24)]
 
     # counters
     encounters = 0
@@ -31,7 +21,7 @@ def build_embed(all_events):
     shinies = 0
     runaways = 0
 
-    # event breakdown per source
+    # breakdown
     wild = 0
     incense = 0
     lure = 0
@@ -43,20 +33,19 @@ def build_embed(all_events):
     latest_catches = []
     latest_shinies = []
 
-    # ------------------------------------------------
-    # PROCESS LOGIC
-    # ------------------------------------------------
     for e in rows:
+        et = e.get("type", "").lower()
 
-        et = e["type"].lower()
-
-        # ENCOUNTERS
+        # ===== ENCOUNTERS =====
         if et == "encounter":
             encounters += 1
             src = e.get("source", "wild")
-            if src == "wild": wild += 1
-            elif src == "incense": incense += 1
-            elif src == "lure": lure += 1
+            if src == "wild":
+                wild += 1
+            elif src == "incense":
+                incense += 1
+            elif src == "lure":
+                lure += 1
 
         elif et == "quest":
             encounters += 1
@@ -74,31 +63,23 @@ def build_embed(all_events):
             encounters += 1
             maxb += 1
 
-        # FLED
+        # ===== RUNAWAYS =====
         if et == "fled":
             runaways += 1
 
-        # CATCH
+        # ===== CATCHES & SHINIES =====
         if et == "catch":
             catches += 1
             latest_catches.append(e)
+            if e.get("shiny"):
+                shinies += 1
+                latest_shinies.append(e)
 
-        # SHINY (telt dubbel)
-        if et == "shiny":
-            shinies += 1
-            catches += 1
-            latest_catches.append(e)
-            latest_shinies.append(e)
-
-    # ------------------------------------------------
-    # RATES
-    # ------------------------------------------------
+    # ===== RATES =====
     effective_encounters = max(encounters - runaways, 1)
     catch_rate = (catches / effective_encounters) * 100
 
-    # ------------------------------------------------
-    # Latest Catches (max 5)
-    # ------------------------------------------------
+    # ===== Latest Catches (max 5) =====
     latest_catches = sorted(
         latest_catches, key=lambda x: x["timestamp"], reverse=True
     )[:5]
@@ -109,12 +90,11 @@ def build_embed(all_events):
             f"({e['timestamp'].strftime('%d %B %Y %H:%M')})"
             for e in latest_catches
         )
-        if latest_catches else "—"
+        if latest_catches
+        else "—"
     )
 
-    # ------------------------------------------------
-    # Latest Shinies (max 5)
-    # ------------------------------------------------
+    # ===== Latest Shinies (max 5) =====
     latest_shinies = sorted(
         latest_shinies, key=lambda x: x["timestamp"], reverse=True
     )[:5]
@@ -125,12 +105,11 @@ def build_embed(all_events):
             f"({e['timestamp'].strftime('%d %B %Y %H:%M')})"
             for e in latest_shinies
         )
-        if latest_shinies else "—"
+        if latest_shinies
+        else "—"
     )
 
-    # ------------------------------------------------
-    # BUILD EMBED
-    # ------------------------------------------------
+    # ===== BUILD EMBED =====
     emb = discord.Embed(
         title="📊 Today’s Stats (Last 24h)",
         color=0x5865F2
@@ -140,20 +119,17 @@ def build_embed(all_events):
     emb.add_field(name="🎯 Catches", value=str(catches), inline=True)
     emb.add_field(name="✨ Shinies", value=str(shinies), inline=True)
 
-    emb.add_field(
-        name="📌 Event breakdown",
-        value=(
-            f"🐾 Wild: {wild}\n"
-            f"🧪 Incense: {incense}\n"
-            f"🎣 Lure: {lure}\n"
-            f"📜 Quest: {quest}\n"
-            f"⚔️ Raid: {raid}\n"
-            f"🚀 Rocket: {rocket}\n"
-            f"🌀 Max: {maxb}\n"
-            f"🏃 Runaways: {runaways}"
-        ),
-        inline=False
+    breakdown = (
+        f"🐾 Wild: {wild}\n"
+        f"🧪 Incense: {incense}\n"
+        f"🎣 Lure: {lure}\n"
+        f"📜 Quest: {quest}\n"
+        f"⚔️ Raid: {raid}\n"
+        f"🚀 Rocket: {rocket}\n"
+        f"🌀 Max: {maxb}\n"
+        f"🏃 Runaways: {runaways}"
     )
+    emb.add_field(name="📌 Event breakdown", value=breakdown, inline=False)
 
     emb.add_field(name="🎯 Catch rate", value=f"{catch_rate:.1f}%", inline=True)
     emb.add_field(name="🏃 Runaways (est.)", value=str(runaways), inline=True)
