@@ -1,132 +1,180 @@
-# PXstats • stats.py
-# ------------------------------------------------------------
-# Builds summary embed + handles last 24h stats
-# Fully supports: Catch, Shiny, Raid, Rocket, Quest, MaxBattle
-# Shiny = double log (Catch + Shiny)
-# ------------------------------------------------------------
+# ================================================================
+# PXstats – stats.py • v4.1 • 2025-11-13
+# Nieuwe teller-engine gebaseerd op Kjell zijn regels
+# Inclusief Latest Shinies block
+# ================================================================
 
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+from PXstats.utils import TZ
+
+# EVENTS wordt beheerd door utils
+EVENTS = []
+
+def add_event(ev):
+    """Log één event in EVENTS"""
+    EVENTS.append(ev)
+
+def last_24h():
+    """Filter events van laatste 24 uur"""
+    now = datetime.now(TZ)
+    return [e for e in EVENTS if (now - e["timestamp"]) <= timedelta(hours=24)]
+
+
+# ================================================================
+# BUILD EMBED
+# ================================================================
 import discord
 
-TZ = ZoneInfo("Europe/Brussels")
+def build_embed(all_events):
 
+    rows = last_24h()
 
-# ------------------------------------------------------------
-# FILTER EVENTS (LAST 24H)
-# ------------------------------------------------------------
-def last_24h(events):
-    """Return all events from the last 24 hours."""
-    now = datetime.now(TZ)
-    cutoff = now - timedelta(hours=24)
-    return [e for e in events if e["timestamp"] >= cutoff]
+    # ----------------------------------------------------------
+    # COUNTERS
+    # ----------------------------------------------------------
 
+    encounters = 0
+    catches = 0
+    shinies = 0
+    runaways = 0
 
-# ------------------------------------------------------------
-# EMBED BUILDER
-# ------------------------------------------------------------
-def build_embed(events):
-    """Builds the Daily Summary embed."""
-    
-    # Filter for last 24h
-    ev24 = last_24h(events)
+    # breakdown
+    wild = 0
+    incense = 0
+    lure = 0
+    quest = 0
+    raid = 0
+    rocket = 0
+    maxb = 0
 
-    encounters = sum(1 for e in ev24 if e["type"] == "Encounter")
-    catches    = sum(1 for e in ev24 if e["type"] == "Catch")
-    shinies    = sum(1 for e in ev24 if e["type"] == "Shiny")
-    rockets    = sum(1 for e in ev24 if e["type"] == "Rocket")
-    raids      = sum(1 for e in ev24 if e["type"] == "Raid")
-    quests     = sum(1 for e in ev24 if e["type"] == "Quest")
-    maxb       = sum(1 for e in ev24 if e["type"] == "MaxBattle")
-    runaways   = sum(1 for e in ev24 if e["type"] == "Fled")
+    # lists
+    latest_catches = []
+    latest_shinies = []
 
-    # Latest catches
-    latest_catches = [
-        e for e in reversed(ev24) if e["type"] == "Catch"
-    ][:5]
+    for e in rows:
 
-    # Latest shinies
-    latest_shinies = [
-        e for e in reversed(ev24) if e["type"] == "Shiny"
-    ][:5]
+        et = e["type"].lower()
 
-    # Perfect IV (15/15/15)
-    hundos = [
-        e for e in ev24
-        if e["type"] in ("Catch", "Shiny")
-        and e.get("iv") == [15, 15, 15]
-    ]
-    hundos_count = len(hundos)
+        # ------------------------------------------------------
+        # ENCOUNTERS
+        # ------------------------------------------------------
+        if et == "encounter":
+            encounters += 1
 
-    # Catch rate
-    try:
-        catch_rate = (catches / encounters) * 100
-    except ZeroDivisionError:
-        catch_rate = 0.0
+            src = e.get("source", "wild")
+            if src == "wild":
+                wild += 1
+            elif src == "incense":
+                incense += 1
+            elif src == "lure":
+                lure += 1
 
+        elif et == "quest":
+            encounters += 1
+            quest += 1
+
+        elif et == "raid":
+            encounters += 1
+            raid += 1
+
+        elif et == "rocket":
+            encounters += 1
+            rocket += 1
+
+        elif et == "maxbattle":
+            encounters += 1
+            maxb += 1
+
+        # ------------------------------------------------------
+        # FLED
+        # ------------------------------------------------------
+        elif et == "fled":
+            runaways += 1
+
+        # ------------------------------------------------------
+        # CATCH
+        # ------------------------------------------------------
+        if et == "catch":
+            catches += 1
+            latest_catches.append(e)
+
+        # ------------------------------------------------------
+        # SHINY (telt als catch + shiny)
+        # ------------------------------------------------------
+        if et == "shiny":
+            shinies += 1
+            catches += 1
+            latest_catches.append(e)
+            latest_shinies.append(e)
+
+    # ----------------------------------------------------------
+    # RATE
+    # ----------------------------------------------------------
+
+    effective_encounters = max(1, encounters - runaways)
+    catch_rate = (catches / effective_encounters) * 100
+
+    # laatste 5 catches
+    latest_catches = sorted(
+        latest_catches, key=lambda x: x["timestamp"], reverse=True
+    )[:5]
+
+    latest_catches_txt = "\n".join(
+        f"{e['name']} {e['iv'][0]}/{e['iv'][1]}/{e['iv'][2]} "
+        f"({e['timestamp'].strftime('%d %B %Y %H:%M')})"
+        for e in latest_catches
+    ) if latest_catches else "—"
+
+    # laatste 5 shinies
+    latest_shinies = sorted(
+        latest_shinies, key=lambda x: x["timestamp"], reverse=True
+    )[:5]
+
+    latest_shinies_txt = "\n".join(
+        f"{e['name']} {e['iv'][0]}/{e['iv'][1]}/{e['iv'][2]} "
+        f"({e['timestamp'].strftime('%d %B %Y %H:%M')})"
+        for e in latest_shinies
+    ) if latest_shinies else "—"
+
+    # ----------------------------------------------------------
     # BUILD EMBED
-    embed = discord.Embed(
+    # ----------------------------------------------------------
+
+    emb = discord.Embed(
         title="📊 Today’s Stats (Last 24h)",
         color=0x5865F2
     )
 
-    embed.add_field(name="Encounters", value=str(encounters), inline=True)
-    embed.add_field(name="Catches", value=str(catches), inline=True)
-    embed.add_field(name="Shinies", value=str(shinies), inline=True)
+    emb.add_field(name="Encounters", value=str(encounters))
+    emb.add_field(name="Catches", value=str(catches))
+    emb.add_field(name="Shinies", value=str(shinies))
+    emb.add_field(name="\u200b", value="\u200b")
 
-    embed.add_field(
-        name="Event breakdown",
-        value=(
-            f"Wild: {encounters}\n"
-            f"Quest: {quests}\n"
-            f"Raid: {raids}\n"
-            f"Rocket: {rockets}\n"
-            f"Max: {maxb}\n"
-            f"Runaways: {runaways}"
-        ),
-        inline=False
+    breakdown = (
+        f"Wild: {wild}\n"
+        f"Incense: {incense}\n"
+        f"Lure: {lure}\n"
+        f"Quest: {quest}\n"
+        f"Raid: {raid}\n"
+        f"Rocket: {rocket}\n"
+        f"Max: {maxb}\n"
+        f"Runaways: {runaways}"
     )
 
-    embed.add_field(
-        name="🎯 Catch rate",
-        value=f"{catch_rate:.1f}%",
-        inline=True
-    )
-    embed.add_field(
-        name="🏃 Runaways (est.)",
-        value=str(runaways),
-        inline=True
-    )
-    embed.add_field(
-        name="🏆 Perfect 100 IV",
-        value=str(hundos_count),
-        inline=True
-    )
+    emb.add_field(name="Event breakdown", value=breakdown, inline=False)
 
-    # Latest catches
-    if latest_catches:
-        txt = "\n".join(
-            f"{e['name']} {e['iv'][0]}/{e['iv'][1]}/{e['iv'][2]} "
-            f"({e['timestamp'].strftime('%d %B %Y %H:%M')})"
-            for e in latest_catches
-        )
-    else:
-        txt = "—"
-    embed.add_field(name="🕒 Latest Catches", value=txt, inline=False)
+    emb.add_field(name="🎯 Catch rate", value=f"{catch_rate:.1f}%", inline=True)
+    emb.add_field(name="🏃 Runaways (est.)", value=str(runaways), inline=True)
+    emb.add_field(name="🏆 Perfect 100 IV", value=str(len([e for e in rows if e.get('iv') == (15,15,15)])), inline=True)
 
-    # Latest shinies
-    if latest_shinies:
-        txt2 = "\n".join(
-            f"{e['name']} {e['iv'][0]}/{e['iv'][1]}/{e['iv'][2]} "
-            f"({e['timestamp'].strftime('%d %B %Y %H:%M')})"
-            for e in latest_shinies
-        )
-    else:
-        txt2 = "—"
-    embed.add_field(name="✨ Latest Shinies", value=txt2, inline=False)
+    # ----------------------------------------------------------
+    # Latest Catches
+    # ----------------------------------------------------------
+    emb.add_field(name="🕒 Latest Catches", value=latest_catches_txt, inline=False)
 
-    embed.set_footer(
-        text=f"Rate base: {encounters} • stats-v3.9.2 • {datetime.now(TZ).date()}"
-    )
+    # ----------------------------------------------------------
+    # Latest Shinies
+    # ----------------------------------------------------------
+    emb.add_field(name="✨ Latest Shinies", value=latest_shinies_txt, inline=False)
 
-    return embed
+    return emb
