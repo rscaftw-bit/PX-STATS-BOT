@@ -1,5 +1,5 @@
 # ======================================================
-# PXstats • main.py • 2025-11-13
+# PXstats • main.py • v4.0 (13-11-2025)
 # Clean, stable, fixed release
 # ======================================================
 
@@ -14,11 +14,13 @@ import threading
 import discord
 from discord import app_commands
 
+# ------------------------------------------------------
+# Local modules
+# ------------------------------------------------------
 from PXstats.parser import parse_polygonx_embed
 from PXstats.stats import build_embed
-from PXstats.utils import (
-    load_events, save_events, add_event, EVENTS, TZ, load_pokedex
-)
+from PXstats.utils import load_events, save_events, add_event, EVENTS, TZ
+from PXstats.pokedex import load_pokedex
 
 
 # ======================================================
@@ -90,13 +92,12 @@ async def on_ready():
 
 
 # ======================================================
-# INGEST FROM POLYGONX
+# INGEST FROM POLYGONX / SPIDEY BOT
 # ======================================================
 
 @bot.event
 async def on_message(msg: discord.Message):
 
-    # Skip bot messages unless it's Spidey/PolygonX
     if msg.author == bot.user:
         return
 
@@ -110,12 +111,10 @@ async def on_message(msg: discord.Message):
         if not etype:
             continue
 
-        # timestamp based on embed time or now
         ts = e.timestamp or datetime.now(TZ)
         data["timestamp"] = ts
         data["type"] = etype
 
-        # log shiny + catch
         add_event(data)
         processed += 1
 
@@ -177,7 +176,6 @@ async def csv_export(inter):
     try:
         await inter.response.defer(ephemeral=True)
 
-        # Build CSV string
         lines = [
             "timestamp,type,name,iv0,iv1,iv2"
         ]
