@@ -1,7 +1,7 @@
-# ===============================================================
-# PXstats • utils.py • v4.0 (FINAL)
-# Core storage, events manager, time utilities
-# ===============================================================
+# ======================================================
+# PXstats • utils.py • 2025-11-13
+# Includes: load_pokedex(), save_pokedex(), event storage
+# ======================================================
 
 import json
 import os
@@ -11,115 +11,95 @@ from zoneinfo import ZoneInfo
 # Timezone
 TZ = ZoneInfo("Europe/Brussels")
 
-# Path to event storage
-EVENTS_FILE = os.path.join(os.path.dirname(__file__), "events.json")
+# File locations
+EVENT_FILE = "events.json"
+POKEDEX_FILE = os.path.join(os.path.dirname(__file__), "pokedex.json")
 
 # In-memory storage
 EVENTS = []
+POKEDEX = {}
 
 
-# ===============================================================
-# LOAD EVENTS
-# ===============================================================
+# ======================================================
+# EVENTS LOADING
+# ======================================================
+
 def load_events():
-    """Load events from events.json into EVENTS list."""
     global EVENTS
-
-    if not os.path.exists(EVENTS_FILE):
+    if not os.path.exists(EVENT_FILE):
         EVENTS = []
-        print("[EVENTS] No events.json found → starting fresh")
         return EVENTS
-
+    
     try:
-        with open(EVENTS_FILE, "r", encoding="utf-8") as f:
+        with open(EVENT_FILE, "r", encoding="utf-8") as f:
             raw = json.load(f)
 
-        EVENTS = []
-        for e in raw:
-            # ensure timestamps convert to datetime
-            if isinstance(e.get("timestamp"), str):
-                try:
-                    e["timestamp"] = datetime.fromisoformat(e["timestamp"])
-                except:
-                    # fallback: treat as UTC
-                    e["timestamp"] = datetime.fromtimestamp(0, TZ)
-
-            EVENTS.append(e)
-
-        print(f"[EVENTS] Loaded {len(EVENTS)} events")
+        # Convert timestamps to datetime
+        EVENTS = [
+            {
+                **e,
+                "timestamp": datetime.fromisoformat(e["timestamp"])
+            }
+            for e in raw
+        ]
+        print(f"[LOAD] {len(EVENTS)} events geladen.")
+        return EVENTS
 
     except Exception as e:
-        print(f"[ERROR] Could not load events: {e}")
+        print("[LOAD ERROR]", e)
         EVENTS = []
+        return EVENTS
 
-    return EVENTS
 
-
-# ===============================================================
-# SAVE EVENTS
-# ===============================================================
 def save_events():
-    """Save all events to events.json."""
     try:
-        serial = []
-        for e in EVENTS:
-            evt = dict(e)
-            # convert datetime to ISO8601 string
-            if isinstance(evt["timestamp"], datetime):
-                evt["timestamp"] = evt["timestamp"].isoformat()
-            serial.append(evt)
+        data = [
+            {
+                **e,
+                "timestamp": e["timestamp"].isoformat()
+            }
+            for e in EVENTS
+        ]
 
-        with open(EVENTS_FILE, "w", encoding="utf-8") as f:
-            json.dump(serial, f, indent=2, ensure_ascii=False)
+        with open(EVENT_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
 
-        print(f"[EVENTS] Saved ({len(EVENTS)} events)")
+        print(f"[SAVE] {len(EVENTS)} events opgeslagen.")
 
     except Exception as e:
-        print(f"[SAVE ERROR] {e}")
+        print("[SAVE ERROR]", e)
 
 
-# ===============================================================
-# ADD EVENT
-# ===============================================================
-def add_event(data: dict):
-    """
-    Add event (Catch, Shiny, Encounter, Rocket, Raid, etc.)
-    Events look like:
-    {
-        "timestamp": datetime,
-        "type": "Catch",
-        "name": "...",
-        "iv": [a,d,s]
-    }
-    """
-
-    # Ensure timestamp exists
-    if "timestamp" not in data:
-        data["timestamp"] = datetime.now(TZ)
-
-    EVENTS.append(data)
-    return data
+def add_event(e):
+    EVENTS.append(e)
 
 
-# ===============================================================
-# FILTER: LAST 24 HOURS
-# ===============================================================
-def last_24h():
-    """Return events from last 24 hours."""
-    cutoff = datetime.now(TZ).timestamp() - 24 * 3600
-    rows = []
+# ======================================================
+# POKEDEX LOADING
+# ======================================================
 
-    for e in EVENTS:
-        ts = e["timestamp"]
-        if isinstance(ts, datetime):
-            tstamp = ts.timestamp()
-        else:
-            try:
-                tstamp = datetime.fromisoformat(ts).timestamp()
-            except:
-                continue
+def load_pokedex():
+    """Load pokedex.json and store it globally."""
+    global POKEDEX
 
-        if tstamp >= cutoff:
-            rows.append(e)
+    try:
+        with open(POKEDEX_FILE, "r", encoding="utf-8") as f:
+            POKEDEX = json.load(f)
 
-    return rows
+        print(f"[POKEDEX] Loaded {len(POKEDEX)} entries.")
+        return POKEDEX
+
+    except Exception as e:
+        print(f"[POKEDEX ERROR] {e}")
+        POKEDEX = {}
+        return POKEDEX
+
+
+def save_pokedex(data):
+    """Optional: if you ever rewrite the Pokédex."""
+    try:
+        with open(POKEDEX_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        print("[POKEDEX] Saved.")
+    except Exception as e:
+        print("[POKEDEX SAVE ERROR]", e)
