@@ -1,105 +1,81 @@
 # ======================================================
 # PXstats • utils.py • 2025-11-13
-# Includes: load_pokedex(), save_pokedex(), event storage
+# Event storage + timezone
 # ======================================================
+
+from __future__ import annotations
 
 import json
 import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-# Timezone
+# Timezone (Brussels)
 TZ = ZoneInfo("Europe/Brussels")
 
-# File locations
-EVENT_FILE = "events.json"
-POKEDEX_FILE = os.path.join(os.path.dirname(__file__), "pokedex.json")
+# Padjes
+BASE_DIR = os.path.dirname(__file__)
+EVENT_FILE = os.path.join(BASE_DIR, "events.json")
 
-# In-memory storage
-EVENTS = []
-POKEDEX = {}
+# Globale event-list
+EVENTS: list[dict] = []
 
 
 # ======================================================
-# EVENTS LOADING
+# EVENTS LADEN / OPSLAAN
 # ======================================================
 
-def load_events():
-    global EVENTS
+def load_events() -> list[dict]:
+    """Laad events.json in de globale EVENTS-list (in-place)."""
+    EVENTS.clear()
+
     if not os.path.exists(EVENT_FILE):
-        EVENTS = []
+        print("[EVENTS] Geen events.json gevonden, start leeg.")
         return EVENTS
-    
+
     try:
         with open(EVENT_FILE, "r", encoding="utf-8") as f:
             raw = json.load(f)
 
-        # Convert timestamps to datetime
-        EVENTS = [
-            {
-                **e,
-                "timestamp": datetime.fromisoformat(e["timestamp"])
-            }
-            for e in raw
-        ]
-        print(f"[LOAD] {len(EVENTS)} events geladen.")
-        return EVENTS
+        for e in raw:
+            ts_str = e.get("timestamp")
+            if ts_str:
+                try:
+                    e["timestamp"] = datetime.fromisoformat(ts_str)
+                except Exception:
+                    # fallback: strip timezone als er iets raars in zit
+                    e["timestamp"] = datetime.fromisoformat(ts_str.split("+")[0])
+            else:
+                e["timestamp"] = datetime.now(TZ)
 
-    except Exception as e:
-        print("[LOAD ERROR]", e)
-        EVENTS = []
-        return EVENTS
+            EVENTS.append(e)
+
+        print(f"[EVENTS] Loaded {len(EVENTS)} events.")
+    except Exception as exc:
+        print(f"[EVENTS ERROR] {exc}")
+
+    return EVENTS
 
 
-def save_events():
+def save_events() -> None:
+    """Schrijf EVENTS terug naar events.json."""
     try:
-        data = [
-            {
-                **e,
-                "timestamp": e["timestamp"].isoformat()
-            }
-            for e in EVENTS
-        ]
+        to_save: list[dict] = []
+        for e in EVENTS:
+            d = dict(e)
+            ts = d.get("timestamp")
+            if isinstance(ts, datetime):
+                d["timestamp"] = ts.isoformat()
+            to_save.append(d)
 
         with open(EVENT_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+            json.dump(to_save, f, indent=2)
 
-        print(f"[SAVE] {len(EVENTS)} events opgeslagen.")
-
-    except Exception as e:
-        print("[SAVE ERROR]", e)
-
-
-def add_event(e):
-    EVENTS.append(e)
+        print(f"[EVENTS] Saved {len(EVENTS)} events.")
+    except Exception as exc:
+        print(f"[EVENTS SAVE ERROR] {exc}")
 
 
-# ======================================================
-# POKEDEX LOADING
-# ======================================================
-
-def load_pokedex():
-    """Load pokedex.json and store it globally."""
-    global POKEDEX
-
-    try:
-        with open(POKEDEX_FILE, "r", encoding="utf-8") as f:
-            POKEDEX = json.load(f)
-
-        print(f"[POKEDEX] Loaded {len(POKEDEX)} entries.")
-        return POKEDEX
-
-    except Exception as e:
-        print(f"[POKEDEX ERROR] {e}")
-        POKEDEX = {}
-        return POKEDEX
-
-
-def save_pokedex(data):
-    """Optional: if you ever rewrite the Pokédex."""
-    try:
-        with open(POKEDEX_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        print("[POKEDEX] Saved.")
-    except Exception as e:
-        print("[POKEDEX SAVE ERROR]", e)
+def add_event(ev: dict) -> None:
+    """Voeg één event toe aan de globale lijst."""
+    EVENTS.append(ev)
