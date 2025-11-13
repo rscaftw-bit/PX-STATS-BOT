@@ -1,65 +1,83 @@
 # PXstats • pokedex.py
-# Loads the Ultra Full Pokédex (Option C)
-# Supports forms like 487-O, 479-W, 1024-T
-# Fallbacks safely if entry not found
+# -------------------------------------------------------------
+# Full Pokédex loader with p### and p###-FORMID support.
+# Works with complete pokedex.json (1–1025 + variants).
+# -------------------------------------------------------------
 
 import json
 import os
 
-# Path to full Pokédex JSON file
-POKEDEX_FILE = os.path.join(os.path.dirname(__file__), "pokedex_full.json")
+POKEDEX = {}
 
-# Loaded data
-_POKEDEX = {}
 
-# ============================
-# LOAD POKEDEX
-# ============================
-def load_pokedex() -> dict:
-    global _POKEDEX
+# -------------------------------------------------------------
+# LOAD POKEDEX FROM JSON
+# -------------------------------------------------------------
+def load_pokedex():
+    """Load pokedex.json from PXstats folder."""
+    global POKEDEX
 
-    if _POKEDEX:
-        return _POKEDEX  # already loaded
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    json_path = os.path.join(base_dir, "pokedex.json")
 
     try:
-        with open(POKEDEX_FILE, "r", encoding="utf-8") as f:
-            _POKEDEX = json.load(f)
+        with open(json_path, "r", encoding="utf8") as f:
+            POKEDEX = json.load(f)
 
-        print(f"[Pokédex] Loaded {len(_POKEDEX)} entries from pokedex_full.json")
+        print(f"[POKÉDEX] Loaded {len(POKEDEX)} entries")
 
     except Exception as e:
-        print(f"[Pokédex ERROR] Failed to load pokedex_full.json: {e}")
-        _POKEDEX = {}
+        print(f"[ERROR] Could not load pokedex.json: {e}")
+        POKEDEX = {}
 
-    return _POKEDEX
+    return POKEDEX
 
 
-# ============================
-# GET NAME FROM POKÉDEX ID
-# ============================
-def get_name_from_id(pid: str) -> str:
+# -------------------------------------------------------------
+# RESOLVE NAME FROM ID
+# -------------------------------------------------------------
+def get_name_from_id(raw):
     """
-    pid examples:
-       "785"
-       "487-O"
-       "479-W"
-       "1024-T"
+    Accepts:
+        "785"
+        "p785"
+        "p0785"
+        "p785-h"
+        "785-h"
+        "1024-T"
+        "1012-A"
+    Returns:
+        Pokémon name (string) or "Unknown (raw)"
     """
-    pokedex = load_pokedex()
 
-    # direct match
-    if pid in pokedex:
-        return pokedex[pid]
+    if raw is None:
+        return "Unknown"
 
-    # safety: strip leading zeros ("p0025" -> "25")
-    pid_clean = pid.lstrip("0")
-    if pid_clean in pokedex:
-        return pokedex[pid_clean]
+    key = str(raw).lower().replace(" ", "").replace("p", "")
 
-    # Try uppercase for form keys
-    pid_upper = pid.upper()
-    if pid_upper in pokedex:
-        return pokedex[pid_upper]
+    # Example:
+    # raw = "p1017-H" → key = "1017-h"
+    # raw = "785" → key = "785"
 
-    # fallback unknown
-    return f"Unknown #{pid}"
+    # Direct match
+    if key in POKEDEX:
+        return POKEDEX[key]
+
+    # Form-ID case-insensitive
+    # Example: "1017-h" → try "1017-H"
+    # Example: "1017-h" → try "1017-H"
+    upper_key = key.upper()
+    if upper_key in POKEDEX:
+        return POKEDEX[upper_key]
+
+    # Remove leading zeroes "0007" → "7"
+    nozero = key.lstrip("0")
+    if nozero in POKEDEX:
+        return POKEDEX[nozero]
+
+    # Try upper-case variant for forms without zero
+    if nozero.upper() in POKEDEX:
+        return POKEDEX[nozero.upper()]
+
+    # If still not found:
+    return f"Unknown ({raw})"
