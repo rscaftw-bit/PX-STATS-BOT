@@ -1,119 +1,157 @@
-import time, json, os
-from datetime import datetime
-import discord
+# PXstats • stats.py (FINAL)
+# Compatible with new shiny-flag parser
 
-# ========== Load Pokédex ==========
-POKEDEX = {}
-try:
-    with open(os.path.join(os.path.dirname(__file__), "pokedex.json"), "r", encoding="utf-8") as f:
-        POKEDEX = json.load(f)
-        print(f"[POKEDEX] loaded {len(POKEDEX)} entries")
-except Exception as e:
-    print("[POKEDEX] could not load:", e)
+from datetime import datetime, timedelta
+from discord import Embed
+from PXstats.utils import TZ
 
-def dex_name(pname: str) -> str:
-    """Convert p### placeholders to Pokémon names if possible."""
-    pname = str(pname or "").strip()
-    if pname.lower().startswith("p"):
-        pid = pname.lower().replace("p", "").strip()
-        if pid.isdigit():
-            return POKEDEX.get(pid, f"p{pid}")
-    return pname
+# ---------------------------------------------------------
+# Internal: Format timestamp
+# ---------------------------------------------------------
 
-# ========== Stats Builder ==========
-def build_stats(rows):
-    by_type = {}
-    for r in rows:
-        by_type[r["type"]] = by_type.get(r["type"], 0) + 1
+def fmt(ts: float) -> str:
+    """Format UNIX timestamp to readable EU datetime."""
+    return datetime.fromtimestamp(ts, TZ).strftime("%d %B %Y %H:%M")
 
-    # Filter encounters by source
-    enc_wild   = sum(1 for r in rows if r["type"] == "Encounter" and r["data"].get("source") == "wild")
-    enc_quest  = sum(1 for r in rows if r["type"] == "Encounter" and r["data"].get("source") == "quest")
-    enc_raid   = sum(1 for r in rows if r["type"] == "Encounter" and r["data"].get("source") == "raid")
-    enc_rocket = sum(1 for r in rows if r["type"] == "Encounter" and r["data"].get("source") == "rocket")
-    enc_max    = sum(1 for r in rows if r["type"] == "Encounter" and r["data"].get("source") == "maxbattle")
-    fled       = by_type.get("Fled", 0)
-    catches    = by_type.get("Catch", 0)
+# ---------------------------------------------------------
+# Internal: CSV helper
+# ---------------------------------------------------------
 
-    enc_total = enc_wild + enc_quest + enc_raid + enc_rocket + enc_max
-    rate_base = max(enc_total, catches)
+def make_csv_rows(events):
+    """Return a list of dicts for CSV export."""
+    rows = []
+    for ev in events:
+        data = ev["data"]
+        rows.append({
+            "timestamp": fmt(ev["ts"]),
+            "type": ev["type"],
+            "name": data.get("name"),
+            "iv": "/".join(map(str, data["iv"])) if data.get("iv") else "",
+            "shiny": "YES" if data.get("shiny") else "NO",
+            "source": data.get("source", "")
+        })
+    return rows
 
-    # Perfect IV
-    perfect = sum(1 for r in rows if r["type"] == "Catch" and r["data"].get("iv") == (15, 15, 15))
+# ---------------------------------------------------------
+# Main embed builder
+# ---------------------------------------------------------
 
-    # Shinies
-    shiny_rows = [
-        r for r in rows if r["type"] == "Shiny" or (r["type"] == "Catch" and r["data"].get("shiny"))
-    ]
-    shinies = len(shiny_rows)
+def build_embed(events):
+    """
+    Build the Discord embed for /summary.
+    """
+    # ========== Counters ==========
+    catches = 0
+    shinies = 0
+    runaways = 0
+
+    wild = quest = raid = rocket = maxb = 0
+
+    latest_catches = []
+    latest_shinies = []
+
+    for ev in events:
+        etype = ev.get("type")
+        data = ev.get("data", {})
+        ts = ev.get("ts")
+
+        # ------- Count catches -------
+        if etype == "Catch":
+            catches += 1
+            latest_catches.append(ev)
+
+            if data.get("shiny"):
+                shinies += 1
+                latest_shinies.append(ev)
+
+        # ------- Count shiny Encounter Ping -------
+        if etype == "Encounter" and data.get("shiny"):
+            shinies += 1
+            latest_shinies.append(ev)
+
+        # ------- Event breakdown -------
+        if etype == "Encounter":
+            src = data.get("source", "wild")
+            if src == "wild":
+                wild += 1
+        elif etype == "Quest":
+            quest += 1
+        elif etype == "Raid":
+            raid += 1
+        elif etype == "Rocket":
+            rocket += 1
+        elif etype == "MaxBattle":
+            maxb += 1
+        elif etype == "Fled":
+            runaways += 1
+
+    # Sort newest first
+    latest_catches = sorted(latest_catches, key=lambda e: e["ts"], reverse=True)[:5]
+    latest_shinies = sorted(latest_shinies, key=lambda e: e["ts"], reverse=True)[:5]
+
+    total_enc = len(events)
+
+    # ---------------------------------------------------------
+    # Build embed
+    # ---------------------------------------------------------
+    e = Embed(
+        title="📊 Today's Stats (Last 24h)",
+        color=0x3498DB
+    )
+
+    # Top line numbers
+    e.add_field(name="Encounters", value=str(total_enc), inline=True)
+    e.add_field(name="Catches", value=str(catches), inline=True)
+    e.add_field(name="Shinies", value=str(shinies), inline=True)
+
+    # Breakdown
+    breakdown = (
+        f"Wild: {wild}\n"
+        f"Quest: {quest}\n"
+        f"Raid: {raid}\n"
+        f"Rocket: {rocket}\n"
+        f"Max: {maxb}\n"
+        f"Runaways: {runaways}"
+    )
+    e.add_field(name="Event breakdown", value=breakdown, inline=False)
 
     # Catch rate
-    runaways = max(0, rate_base - catches)
-    catch_rate = (catches / rate_base * 100) if rate_base > 0 else 0.0
-    shiny_rate = (shinies / catches * 100) if catches > 0 else 0.0
+    catch_rate = (catches / total_enc * 100) if total_enc else 0
+    e.add_field(name="🎯 Catch rate", value=f"{catch_rate:.1f}%", inline=True)
+    e.add_field(name="🏃 Runaways (est.)", value=str(runaways), inline=True)
 
-    # Latest
-    latest_catches = sorted(
-        [r for r in rows if r["type"] == "Catch"],
-        key=lambda x: x["ts"],
-        reverse=True
-    )[:5]
-    latest_shinies = sorted(shiny_rows, key=lambda x: x["ts"], reverse=True)[:5]
+    # 100% IV
+    perfect = 0
+    for ev in events:
+        data = ev["data"]
+        if data.get("iv") == (15, 15, 15):
+            perfect += 1
+    e.add_field(name="🏆 Perfect 100 IV", value=str(perfect), inline=True)
 
-    return {
-        "enc_total": rate_base,
-        "wild": enc_wild, "quest": enc_quest, "raid": enc_raid,
-        "rocket": enc_rocket, "max": enc_max, "fled": fled,
-        "catches": catches, "shinies": shinies, "perfect": perfect,
-        "runaways": runaways, "catch_rate": catch_rate, "shiny_rate": shiny_rate,
-        "latest_catches": latest_catches, "latest_shinies": latest_shinies,
-        "since": min((r["ts"] for r in rows), default=time.time()),
-    }
-
-# ========== Embed Builder ==========
-def _fmt_when(ts: float, style="f"):
-    return f"<t:{int(ts)}:{style}>"
-
-def build_embed(rows, mode="catch"):
-    s = build_stats(rows)
-    emb = discord.Embed(title="📊 Today’s Stats (Last 24h)", color=discord.Color.blurple())
-
-    emb.add_field(name="Encounters", value=str(s["enc_total"]), inline=True)
-    emb.add_field(name="Catches", value=str(s["catches"]), inline=True)
-    emb.add_field(name="Shinies", value=str(s["shinies"]), inline=True)
-
-    # Breakdown now separate
-    breakdown = (
-        f"Wild: {s['wild']}\n"
-        f"Quest: {s['quest']}\n"
-        f"Raid: {s['raid']}\n"
-        f"Rocket: {s['rocket']}\n"
-        f"Max: {s['max']}\n"
-        f"Runaways: {s['fled']}"
-    )
-    emb.add_field(name="**Event breakdown**", value=breakdown, inline=False)
-
-    # Rate section
-    if mode == "catch":
-        emb.add_field(name="🎯 Catch rate", value=f"{s['catch_rate']:.1f}%", inline=True)
+    # Latest Catches
+    if latest_catches:
+        txt = "\n".join(
+            f"{ev['data']['name']} {ev['data']['iv'][0]}/{ev['data']['iv'][1]}/{ev['data']['iv'][2]}  "
+            f"({fmt(ev['ts'])})"
+            for ev in latest_catches
+        )
     else:
-        emb.add_field(name="✨ Shiny rate", value=f"{s['shiny_rate']:.3f}%", inline=True)
-    emb.add_field(name="🏃 Runaways (est.)", value=str(s["runaways"]), inline=True)
-    emb.add_field(name="🏆 Perfect 100 IV", value=str(s["perfect"]), inline=True)
+        txt = "—"
+    e.add_field(name="🕒 Latest Catches", value=txt, inline=False)
 
-    def fmt_list(lst, shiny=False):
-        if not lst: return "—"
-        lines = []
-        for it in lst:
-            n = dex_name(it["data"].get("name") or "?")
-            iv = it["data"].get("iv")
-            ivtxt = f" {iv[0]}/{iv[1]}/{iv[2]}" if iv else ""
-            prefix = "✨ " if shiny else ""
-            lines.append(f"{prefix}{n}{ivtxt} ({_fmt_when(it['ts'], 'f')})")
-        return "\n".join(lines)
+    # Latest Shinies
+    if latest_shinies:
+        s_txt = "\n".join(
+            f"{ev['data']['name']} {ev['data']['iv'][0]}/{ev['data']['iv'][1]}/{ev['data']['iv'][2]}  "
+            f"({fmt(ev['ts'])})"
+            for ev in latest_shinies
+        )
+    else:
+        s_txt = "—"
 
-    emb.add_field(name="🕓 Latest Catches", value=fmt_list(s["latest_catches"]), inline=False)
-    emb.add_field(name="✨ Latest Shinies", value=fmt_list(s["latest_shinies"], shiny=True), inline=False)
+    e.add_field(name="✨ Latest Shinies", value=s_txt, inline=False)
 
-    emb.set_footer(text=f"Rate base: {s['enc_total']} • stats-v3.9.2 • {datetime.now().strftime('%Y-%m-%d')}")
-    return emb
+    # Footer (stats version)
+    e.set_footer(text=f"Rate base: {total_enc} • stats-v3.9.2 • {datetime.now(TZ).strftime('%Y-%m-%d')}")
+
+    return e
