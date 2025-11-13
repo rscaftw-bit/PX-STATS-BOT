@@ -1,34 +1,30 @@
 # ======================================================
-# PXstats • main.py • v4.0 (13-11-2025)
-# Clean, stable, fixed release
+# PXstats • main.py • 2025-11-13
+# Clean, stable, shiny-aware release
 # ======================================================
 
 import os
-import json
-import asyncio
-from datetime import datetime
-from zoneinfo import ZoneInfo
-from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from datetime import datetime
 
 import discord
 from discord import app_commands
 
-# ------------------------------------------------------
-# Local modules
-# ------------------------------------------------------
 from PXstats.parser import parse_polygonx_embed
 from PXstats.stats import build_embed
-from PXstats.utils import load_events, save_events, add_event, EVENTS, TZ
-from PXstats.pokedex import load_pokedex
-
-
-# ======================================================
-# STARTUP
-# ======================================================
+from PXstats.utils import (
+    load_events,
+    save_events,
+    add_event,
+    EVENTS,
+    TZ,
+    load_pokedex,
+)
 
 print("=== PXstats startup initiated ===")
 
+# Pokédex preload (optioneel, maar handig voor debug)
 try:
     pokedex = load_pokedex()
     print(f"[INIT] Pokédex geladen: {len(pokedex)} entries")
@@ -36,9 +32,8 @@ except Exception as e:
     print(f"[ERROR] Pokédex kon niet geladen worden: {e}")
 
 
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 GUILD_ID = int(os.getenv("GUILD_ID", "0")) or None
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0")) or None
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -48,7 +43,7 @@ tree = app_commands.CommandTree(bot)
 
 
 # ======================================================
-# KEEP-ALIVE SERVER (Render)
+# KEEP-ALIVE (voor Render)
 # ======================================================
 
 class KeepAlive(BaseHTTPRequestHandler):
@@ -71,12 +66,19 @@ threading.Thread(target=start_server, daemon=True).start()
 
 
 # ======================================================
-# DISCORD READY
+# READY
 # ======================================================
 
 @bot.event
 async def on_ready():
     print(f"[READY] Logged in as {bot.user}")
+
+    # Events uit JSON inladen
+    try:
+        load_events()
+        print(f"[EVENTS] Ingeladen: {len(EVENTS)} events")
+    except Exception as e:
+        print(f"[EVENTS ERROR] {e}")
 
     try:
         if GUILD_ID:
@@ -92,12 +94,13 @@ async def on_ready():
 
 
 # ======================================================
-# INGEST FROM POLYGONX / SPIDEY BOT
+# INGEST van PolygonX embeds
 # ======================================================
 
 @bot.event
 async def on_message(msg: discord.Message):
 
+    # eigen bot negeren
     if msg.author == bot.user:
         return
 
@@ -112,6 +115,9 @@ async def on_message(msg: discord.Message):
             continue
 
         ts = e.timestamp or datetime.now(TZ)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=TZ)
+
         data["timestamp"] = ts
         data["type"] = etype
 
@@ -120,7 +126,10 @@ async def on_message(msg: discord.Message):
 
     if processed > 0:
         print(f"[INGEST] processed embeds from {msg.author} ({processed} events)")
-        save_events()
+        try:
+            save_events()
+        except Exception as e:
+            print(f"[SAVE ERROR] {e}")
 
 
 # ======================================================
@@ -128,7 +137,7 @@ async def on_message(msg: discord.Message):
 # ======================================================
 
 @tree.command(name="summary", description="Toon statistieken van de laatste 24h")
-async def summary_cmd(inter):
+async def summary_cmd(inter: discord.Interaction):
     try:
         await inter.response.defer(ephemeral=False, thinking=False)
         embed = build_embed(EVENTS)
@@ -137,7 +146,7 @@ async def summary_cmd(inter):
         print("[SUMMARY ERROR]", e)
         try:
             await inter.followup.send("Er ging iets mis bij /summary.")
-        except:
+        except Exception:
             pass
 
 
@@ -146,53 +155,64 @@ async def summary_cmd(inter):
 # ======================================================
 
 @tree.command(name="recent_shinies", description="Toon de laatste 5 shinies")
-async def recent_shinies(inter):
+async def recent_shinies(inter: discord.Interaction):
     try:
-        await inter.response.defer(ephemeral=False)
-        shinies = [e for e in EVENTS if e["type"] == "Shiny"][-5:]
+        await inter.response.defer(ephemeral=False, thinking=False)
+
+        shinies = [e for e in EVENTS
+                   if e.get("type", "").lower() == "catch" and e.get("shiny")]  # alleen echte catches
+
+        shinies = sorted(shinies, key=lambda x: x["timestamp"], reverse=True)[:5]
 
         if not shinies:
-            await inter.followup.send("Geen shinies gevonden in de logs.")
+            await inter.followup.send("Geen shinies gevonden in de laatste 24h.")
             return
 
         txt = "\n".join(
             f"{e['name']} {e['iv'][0]}/{e['iv'][1]}/{e['iv'][2]} "
             f"({e['timestamp'].strftime('%d %B %Y %H:%M')})"
-            for e in reversed(shinies)
+            for e in shinies
         )
-        await inter.followup.send(f"✨ **Laatste Shinies:**\n{txt}")
 
+        await inter.followup.send(f"✨ **Laatste Shinies:**\n{txt}")
     except Exception as e:
         print("[SHINIES ERROR]", e)
-        await inter.followup.send("Fout bij ophalen van shinies.")
+        try:
+            await inter.followup.send("Fout bij ophalen van shinies.")
+        except Exception:
+            pass
 
 
 # ======================================================
-# /csv EXPORT
+# /csv – volledige export
 # ======================================================
 
 @tree.command(name="csv", description="Download volledige CSV-log")
-async def csv_export(inter):
+async def csv_export(inter: discord.Interaction):
     try:
-        await inter.response.defer(ephemeral=True)
+        await inter.response.defer(ephemeral=True, thinking=False)
 
-        lines = [
-            "timestamp,type,name,iv0,iv1,iv2"
-        ]
+        lines = ["timestamp,type,name,iv0,iv1,iv2,shiny,source"]
         for e in EVENTS:
-            iv0, iv1, iv2 = (e.get("iv") or [None, None, None])
-            line = f"{e['timestamp']},{e['type']},{e['name']},{iv0},{iv1},{iv2}"
+            iv = e.get("iv") or (None, None, None)
+            iv0, iv1, iv2 = iv
+            shiny = 1 if e.get("shiny") else 0
+            src = e.get("source", "")
+            line = f"{e['timestamp'].isoformat()},{e.get('type')},{e['name']},{iv0},{iv1},{iv2},{shiny},{src}"
             lines.append(line)
 
         content = "\n".join(lines)
+        data = content.encode("utf-8")
 
         await inter.followup.send(
-            file=discord.File(fp=bytes(content, "utf-8"), filename="pxstats.csv")
+            file=discord.File(fp=bytes(data), filename="pxstats.csv")
         )
-
     except Exception as e:
         print("[CSV ERROR]", e)
-        await inter.followup.send("Fout bij CSV export.")
+        try:
+            await inter.followup.send("Fout bij CSV export.")
+        except Exception:
+            pass
 
 
 # ======================================================
