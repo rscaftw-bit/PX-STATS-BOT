@@ -1,104 +1,138 @@
-# ======================================================
-# PXstats • parser.py • 2025-11-13
-# Detects encounter / catch / quest / raid / rocket / max
-# + IV + shiny + Pokédex mapping
-# ======================================================
-
-from __future__ import annotations
+# PXstats • parser.py • v4.1
+# -----------------------------------------------
+# - Parse PolygonX / Spidey embeds
+# - Detects:
+#   • Encounter / Quest / Raid / Rocket / Max / Hatch / Fled
+#   • Catches (strikt op titel)
+#   • Shiny flag
+#   • Pokédex mapping voor p### en p###-FORM
+# -----------------------------------------------
 
 import re
 import unicodedata
 from typing import Tuple, Optional
-
 import discord
 
 from PXstats.pokedex import get_name_from_id
+
+
+# ---------- helpers ----------
 
 IV_TRIPLE = re.compile(r"IV\s*[:：]?\s*(\d{1,2})/(\d{1,2})/(\d{1,2})", re.I)
 
 
 def _norm(s: str) -> str:
+    """Normalize text to ASCII lowercase."""
     return unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().lower().strip()
 
 
-def _extract_name(desc: str) -> str:
-    # Eerst: "Pokemon: Necrozma (xxx)"
-    m = re.search(r"pokemon:\s*([A-Za-zÀ-ÿ' .0-9:-]+)", desc, re.I)
+def _extract_name(text: str) -> str:
+    """
+    Haal de pokémonnaam of p###-id uit de tekst.
+    Werkt met bv:
+      Pokemon: Necrozma (800:2717:0:3)
+      Pokemon: p785 (785:3130:0:3)
+    """
+
+    # Standaard "Pokemon: X" lijn
+    m = re.search(r"pokemon:\s*([A-Za-z0-9À-ÿ' .:\-()]+)", text, re.I)
     if m:
         return m.group(1).strip()
 
-    # Fallback: p### of p ###-FORM
-    m = re.search(r"\bp\s*0*([0-9]{1,4}(?:-[A-Za-z0-9]+)?)\b", desc, re.I)
+    # Fallback voor "p 123" of "p123" of "p123-form"
+    m = re.search(r"\bp\s*0*([0-9]{1,4}(?:-[A-Za-z0-9]+)?)\b", text, re.I)
     if m:
         return f"p{m.group(1)}"
 
     return "?"
 
 
-def _extract_iv(desc: str):
-    m = IV_TRIPLE.search(desc)
+def _extract_iv(text: str):
+    """Return (atk, def, sta) of None."""
+    m = IV_TRIPLE.search(text)
     if not m:
         return None
     return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
 
 
+# ---------- main parser ----------
+
 def parse_polygonx_embed(e: discord.Embed) -> Tuple[Optional[str], dict]:
-    """Parses a PolygonX embed and returns (event_type, data)."""
+    """
+    Parse één PolygonX embed en geef (event_type, data) terug.
+
+    Mogelijke event_type values:
+      - "Encounter"
+      - "Quest"
+      - "Raid"
+      - "Rocket"
+      - "MaxBattle"
+      - "Hatch"
+      - "Catch"
+      - "Fled"
+      - None (onherkenbaar)
+    """
 
     title = (e.title or "")
     desc = (e.description or "")
     full = f"{title}\n{desc}\n" + "\n".join(f"{f.name}\n{f.value}" for f in e.fields)
+
     full_norm = _norm(full)
+    title_norm = _norm(title)
+    full_lower = (full or "").lower()
 
     data = {
         "name": _extract_name(full),
         "iv": _extract_iv(full),
-        "level": None,
-        "shiny": False,
+        "level": None
     }
 
-    # ---- Pokédex mapping p### → naam ----
-    raw = data["name"].strip().lower()
-    m_id = re.match(r"p\s*0*([0-9]{1,4}(?:-[A-Za-z0-9]+)?)", raw)
+    # ----- Pokédex mapping -----
+    raw_name = data["name"].strip()
+    raw_lower = raw_name.lower()
+
+    # p### of p###-FORM
+    m_id = re.search(r"\bp\s*0*([0-9]{1,4}(?:-[A-Za-z0-9]+)?)\b", raw_lower)
     if m_id:
-        pid = m_id.group(1)
+        pid = m_id.group(1)  # bv "785" of "1017-c"
         resolved = get_name_from_id(pid)
-        print(f"[POKEDEX MAP] {data['name']} -> {resolved}")
-        data["name"] = resolved
+        if resolved:
+            print(f"[Pokédex-map] {data['name']} -> {resolved}")
+            data["name"] = resolved
+    # Glitch "p 7/9/10" enz
+    elif re.match(r"p\s*[0-9]{1,2}/[0-9]{1,2}/[0-9]{1,2}", raw_lower):
+        data["name"] = f"Unknown ({raw_name})"
 
-    # ---- Shiny detectie ----
-    shiny_triggers_text = [" shiny"]
-    shiny_triggers_emoji = ["✨", "⭐", "★", "🌟"]
-
-    if any(t in full_norm for t in shiny_triggers_text) or any(t in full for t in shiny_triggers_emoji):
+    # ----- shiny detection -----
+    if "shiny" in full_lower:
         data["shiny"] = True
 
-    # ---- EVENT TYPE ----
+    # ----- event type detection -----
 
-    # Catch
-    if "pokemon caught successfully" in full_norm or "pokemon caught" in full_norm:
+    # 1) Fled / runaway
+    if any(x in full_norm for x in ["fled", "ran away", "flee"]):
+        return "Fled", data
+
+    # 2) CATCH – strikt op titel, zodat encounters niet als catch tellen
+    if title_norm.startswith("pokemon caught successfully"):
+        return "Catch", data
+    if "pokemon caught successfully" in title_norm:
+        return "Catch", data
+    if title_norm.strip() == "pokemon caught successfully":
         return "Catch", data
 
-    # Quest
-    if "quest" in full_norm:
-        return "Quest", data
+    # 3) Specifieke encounter types op titel
+    if "complete raid battle encounter" in title_norm or (
+        "raid" in title_norm and "encounter" in title_norm
+    ):
+        return "Raid", data
 
-    # Rocket (invasion, grunt, leader, giovanni)
-    if any(k in full_norm for k in ["rocket", "invasion", "grunt", "leader", "giovanni"]):
+    if "invasion encounter" in title_norm:
+        # Rocket encounter
         return "Rocket", data
 
-    # Raid / Max battle
-    if "raid battle" in full_norm or "raid" in full_norm:
-        return "Raid", data
-    if "max battle" in full_norm:
-        return "MaxBattle", data
-
-    # Hatch
-    if "hatch" in full_norm:
-        return "Hatch", data
-
-    # Encounter (wild/incense/lure)
-    if "encounter ping" in full_norm or "encounter" in full_norm:
+    if "encounter ping" in title_norm:
+        # gewone wild encounter (met evt incense/lure)
         src = "wild"
         if "incense" in full_norm:
             src = "incense"
@@ -106,8 +140,30 @@ def parse_polygonx_embed(e: discord.Embed) -> Tuple[Optional[str], dict]:
             src = "lure"
         return "Encounter", {"name": data["name"], "source": src}
 
-    # Fled
-    if any(k in full_norm for k in ["fled", "flee", "ran away"]):
-        return "Fled", data
+    # 4) Quest / Research
+    if "quest" in full_norm or "research" in full_norm:
+        return "Quest", data
 
+    # 5) Rocket keywords buiten titel
+    if any(x in full_norm for x in ["rocket", "grunt", "leader", "giovanni"]):
+        return "Rocket", data
+
+    # 6) Max battle
+    if "max battle" in full_norm or "max raid" in full_norm:
+        return "MaxBattle", data
+
+    # 7) Hatch
+    if "hatch" in full_norm:
+        return "Hatch", data
+
+    # 8) Generieke "encounter" fallback
+    if "encounter" in full_norm:
+        src = "wild"
+        if "incense" in full_norm:
+            src = "incense"
+        elif "lure" in full_norm:
+            src = "lure"
+        return "Encounter", {"name": data["name"], "source": src}
+
+    # Onbekend
     return None, {}
