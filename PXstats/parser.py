@@ -1,16 +1,19 @@
-# PXstats v4 – parser.py (fix shiny)
-# - Shiny detection op ruwe tekst (met/zonder emoji)
-# - Correct encounter vs catch
+# PXstats v4.6 – parser.py
+# -------------------------------------------------------------
+# Fixes:
+# - Shiny detection: match "shiny" in normalized text (newline-safe)
+# - Keeps correct encounter vs catch
 # - Correct Pokédex mapping (p###, p###-FORM)
 # - Handles PolygonX "p 7/9/10" glitch
-# - Betere name-extractie
+# -------------------------------------------------------------
 
 import re
 import unicodedata
 from typing import Tuple, Optional
-import discord
 
+import discord
 from PXstats.pokedex import get_name_from_id
+
 
 # -------------------------------------------------------------
 # Helpers
@@ -20,18 +23,20 @@ IV_TRIPLE = re.compile(r"IV\s*[:：]?\s*(\d{1,2})/(\d{1,2})/(\d{1,2})", re.I)
 
 
 def _norm(s: str) -> str:
-    """Normalize text to ASCII lowercase (voor algemene detectie)."""
-    return unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().lower().strip()
+    """Normalize text to ASCII lowercase."""
+    return unicodedata.normalize("NFKD", s or "").encode(
+        "ascii", "ignore"
+    ).decode().lower().strip()
 
 
 def _extract_name(desc: str) -> str:
-    """Extract Pokémon name of p### ID uit tekst."""
-    # “Pokemon: Necrozma (800:2717:0:3)”
+    """Extract Pokémon name or p### ID from text."""
+    # Normaal: "Pokemon: Necrozma (800:2717:0:3)"
     m = re.search(r"pokemon:\s*([A-Za-zÀ-ÿ' .0-9:-]+)", desc, re.I)
     if m:
         return m.group(1).strip()
 
-    # Fallback: p### of p 123 of p123-XYZ
+    # Fallback: losse "p###" of "p 785" enz.
     m = re.search(r"\bp\s*0*([0-9]{1,4}(?:-[A-Za-z0-9]+)?)\b", desc, re.I)
     if m:
         return f"p{m.group(1)}"
@@ -40,7 +45,7 @@ def _extract_name(desc: str) -> str:
 
 
 def _extract_iv(desc: str):
-    """IV-triple eruit halen."""
+    """Extract IV triple as (atk, def, sta) or None."""
     m = IV_TRIPLE.search(desc)
     if not m:
         return None
@@ -52,21 +57,29 @@ def _extract_iv(desc: str):
 # -------------------------------------------------------------
 
 def parse_polygonx_embed(e: discord.Embed) -> Tuple[Optional[str], dict]:
-    """Parses een PolygonX embed en geeft (event_type, data) terug."""
+    """
+    Parse a PolygonX/Spidey embed en return (event_type, data)
+
+    Mogelijke event_type:
+      - "Encounter"  (wild / incense / lure)
+      - "Catch"
+      - "Raid"
+      - "Rocket"
+      - "Quest"
+      - "MaxBattle"
+      - "Hatch"
+      - "Fled"
+    data bevat minstens:
+      - name
+      - iv: (a,d,s) of None
+      - level (nu nog None)
+      - shiny: bool (optioneel, alleen bij shiny)
+    """
 
     title = (e.title or "")
     desc = (e.description or "")
-
-    field_chunks = []
-    for f in e.fields:
-        if f.name:
-            field_chunks.append(f.name)
-        if f.value:
-            field_chunks.append(f.value)
-
-    full = "\n".join([title, desc] + field_chunks)
-    full_norm = _norm(full)              # genormaliseerd (zonder emoji)
-    full_lower = (full or "").lower()    # ruwe tekst, alleen lowercase
+    full = f"{title}\n{desc}\n" + "\n".join(f"{f.name}\n{f.value}" for f in e.fields)
+    full_norm = _norm(full)
 
     data = {
         "name": _extract_name(full),
@@ -77,79 +90,73 @@ def parse_polygonx_embed(e: discord.Embed) -> Tuple[Optional[str], dict]:
     raw = data["name"].strip().lower()
 
     # ---------------------------------------------------------
-    # Pokédex mapping: p### of p###-FORM → echte naam
+    # Pokédex mapping: p### of p###-FORM → officiële naam
     # ---------------------------------------------------------
-    m_id = re.match(r"p\s*0*([0-9]{1,4}(?:-[A-Za-z0-9]+)?)", raw)
+    m_id = re.search(r"\bp\s*0*([0-9]{1,4}(?:-[A-Za-z0-9]+)?)\b", raw)
     if m_id:
-        pid = m_id.group(1)  # kan bv. "785" of "1017-c" zijn
+        pid = m_id.group(1)          # bv "859" of "1017-C"
         resolved = get_name_from_id(pid)
         print(f"[Pokédex-map] {data['name']} → {resolved}")
         data["name"] = resolved
 
-    # PolygonX glitch: "p 7/9/10" etc.
+    # PolygonX glitch: "p 7/9/10"
     elif re.match(r"p\s*[0-9]{1,2}/[0-9]{1,2}/[0-9]{1,2}", raw):
         data["name"] = f"Unknown ({raw})"
 
     # ---------------------------------------------------------
-    # SHINY-detectie (BELANGRIJK)
+    # SHINY detection – **FIXED**
+    # We kijken gewoon of 'shiny' ergens in de genormaliseerde tekst zit.
+    # (De lijn "SHINY ✨" wordt genormaliseerd naar "shiny")
     # ---------------------------------------------------------
-    shiny = False
-
-    # 1) op ruwe tekst naar 'shiny' zoeken
-    if "shiny" in full_lower:
-        shiny = True
-    # 2) emoji-check op ongenormaliseerde tekst
-    elif any(sym in full for sym in ("✨", "⭐", "★", "🌟")):
-        shiny = True
-
-    if shiny:
+    if "shiny" in full_norm:
         data["shiny"] = True
 
     # ---------------------------------------------------------
-    # EVENT TYPE DETECTIE
+    # EVENT TYPE DETECTION
     # ---------------------------------------------------------
 
-    # CATCH (moet vóór Encounter komen)
-    if "pokemon caught" in full_norm or "caught successfully" in full_norm:
-        if data.get("shiny"):
-            # één log met type "Shiny"
-            return "Shiny", data
+    # CATCH (moet vóór "encounter", want de tekst bevat ook "Encounter" in titles soms)
+    if "pokemon caught successfully" in full_norm or "pokemon caught" in full_norm:
+        # Shiny-catch blijft type "Catch", maar met data["shiny"] = True
         return "Catch", data
+
+    # HATCH
+    if "hatched egg" in full_norm or "hatch" in full_norm:
+        return "Hatch", data
 
     # QUEST
     if "quest" in full_norm:
         return "Quest", data
 
-    # ROCKET
-    if any(x in full_norm for x in ("rocket", "invasion", "grunt", "leader", "giovanni")):
+    # ROCKET (invasion / grunt / leader / giovanni)
+    if any(x in full_norm for x in ["rocket", "invasion encounter", "invasion", "grunt", "leader", "giovanni"]):
         return "Rocket", data
 
     # RAID / MAX
-    if "raid" in full_norm:
+    if "raid battle encounter" in full_norm or "raid" in full_norm:
         return "Raid", data
     if "max battle" in full_norm:
         return "MaxBattle", data
 
-    # HATCH
-    if "hatch" in full_norm:
-        return "Hatch", data
+    # FLED
+    if any(x in full_norm for x in ["pokemon flee", "pokemon fled", "ran away", "fleed"]):
+        return "Fled", data
 
-    # ENCOUNTER (wild/incense/lure)
-    if "encounter" in full_norm or "encounter ping" in full_norm:
+    # ENCOUNTER (wild, incense, lure)
+    if "encounter ping" in full_norm or "encounter!" in full_norm or "encounter" in full_norm:
         src = "wild"
         if "incense" in full_norm:
             src = "incense"
-        elif "lure" in full_norm:
+        elif "lure encounter" in full_norm or "lure" in full_norm:
             src = "lure"
 
         return "Encounter", {
             "name": data["name"],
             "source": src,
+            "iv": data["iv"],
+            "level": data["level"],
+            "shiny": data.get("shiny", False),
         }
 
-    # FLED
-    if any(x in full_norm for x in ("fled", "flee", "ran away")):
-        return "Fled", data
-
-    # Onbekend type → negeren
+    # Onbekend / niet relevant → negeren
     return None, {}
