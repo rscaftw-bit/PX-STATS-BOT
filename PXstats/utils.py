@@ -1,4 +1,4 @@
-# PXstats • utils.py • v4.2
+# PXstats • utils.py • v4.2a
 import os
 import json
 from datetime import datetime, timedelta
@@ -7,17 +7,20 @@ from typing import List, Dict, Any
 
 TZ = ZoneInfo(os.getenv("TZ", "Europe/Brussels"))
 
+# Eén globale lijst, hierop werken we overal
 EVENTS: List[Dict[str, Any]] = []
 
 
 def load_events(path: str = "events.json"):
-    """Laad events.json in geheugen (EVENTS)."""
+    """Laad events.json in geheugen (EVENTS) zonder de lijst-reference te breken."""
     global EVENTS
     try:
         with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
 
-        EVENTS = []
+        # BELANGRIJK: niet EVENTS = [], maar clear() + extend()
+        EVENTS.clear()
+
         for e in raw:
             item = dict(e)
             ts = item.get("timestamp")
@@ -34,10 +37,10 @@ def load_events(path: str = "events.json"):
         print(f"[EVENTS] geladen: {len(EVENTS)} records")
     except FileNotFoundError:
         print("[EVENTS] events.json niet gevonden, start leeg.")
-        EVENTS = []
+        EVENTS.clear()
     except Exception as e:
         print("[EVENT LOAD ERROR]", e)
-        EVENTS = []
+        EVENTS.clear()
 
     return EVENTS
 
@@ -67,7 +70,10 @@ def add_event(event: Dict[str, Any]):
 def last_24h(events):
     """Filter: enkel laatste 24 uur."""
     cutoff = datetime.now(TZ) - timedelta(hours=24)
-    return [e for e in events if isinstance(e.get("timestamp"), datetime) and e["timestamp"] >= cutoff]
+    return [
+        e for e in events
+        if isinstance(e.get("timestamp"), datetime) and e["timestamp"] >= cutoff
+    ]
 
 
 # ---- Pokédex wrapper -------------------------------------------------
