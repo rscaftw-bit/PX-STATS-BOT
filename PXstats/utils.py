@@ -1,109 +1,82 @@
-# PXstats • utils.py
-# Shared storage & helpers
-
-from __future__ import annotations
-
-import json
+# PXstats • utils.py • v4.2
 import os
-from datetime import datetime
-from typing import List, Dict, Any
+import json
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from typing import List, Dict, Any
 
-# Timezone (Belgium default)
-TZ = ZoneInfo("Europe/Brussels")
+TZ = ZoneInfo(os.getenv("TZ", "Europe/Brussels"))
 
-# Path for events and pokedex JSON
-BASE_DIR = os.path.dirname(__file__)
-EVENTS_FILE = os.path.join(BASE_DIR, "events.json")
-POKEDEX_FILE = os.path.join(BASE_DIR, "pokedex.json")
-
-# In-memory stores
 EVENTS: List[Dict[str, Any]] = []
-_POKEDEX_CACHE: Dict[str, str] | None = None
 
 
-# --------------------------------------------------
-# Event persistence
-# --------------------------------------------------
-def _serialize_event(e: Dict[str, Any]) -> Dict[str, Any]:
-    out = dict(e)
-    ts = out.get("timestamp")
-    if isinstance(ts, datetime):
-        out["timestamp"] = ts.astimezone(TZ).isoformat()
-    return out
-
-
-def _deserialize_event(e: Dict[str, Any]) -> Dict[str, Any]:
-    out = dict(e)
-    ts = out.get("timestamp")
-    if isinstance(ts, str):
-        try:
-            out["timestamp"] = datetime.fromisoformat(ts)
-        except Exception:
-            out["timestamp"] = datetime.now(TZ)
-    return out
-
-
-def load_events() -> List[Dict[str, Any]]:
-    """Load events from disk into EVENTS and return the list."""
+def load_events(path: str = "events.json"):
+    """Laad events.json in geheugen (EVENTS)."""
     global EVENTS
     try:
-        with open(EVENTS_FILE, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
-        EVENTS = [_deserialize_event(e) for e in raw]
-        print(f"[EVENTS] loaded {len(EVENTS)} events")
+
+        EVENTS = []
+        for e in raw:
+            item = dict(e)
+            ts = item.get("timestamp")
+            if isinstance(ts, str):
+                try:
+                    ts_dt = datetime.fromisoformat(ts)
+                except Exception:
+                    ts_dt = datetime.now(TZ)
+                if ts_dt.tzinfo is None:
+                    ts_dt = ts_dt.replace(tzinfo=TZ)
+                item["timestamp"] = ts_dt
+            EVENTS.append(item)
+
+        print(f"[EVENTS] geladen: {len(EVENTS)} records")
     except FileNotFoundError:
+        print("[EVENTS] events.json niet gevonden, start leeg.")
         EVENTS = []
-        print("[EVENTS] no existing events file, starting fresh")
     except Exception as e:
+        print("[EVENT LOAD ERROR]", e)
         EVENTS = []
-        print(f"[EVENTS] error loading events: {e}")
+
     return EVENTS
 
 
-def save_events() -> None:
-    """Persist EVENTS list to disk."""
+def save_events(path: str = "events.json"):
+    """Schrijf EVENTS terug naar disk."""
     try:
-        with open(EVENTS_FILE, "w", encoding="utf-8") as f:
-            json.dump([_serialize_event(e) for e in EVENTS], f, ensure_ascii=False)
-        print(f"[EVENTS] saved {len(EVENTS)} events")
+        raw = []
+        for e in EVENTS:
+            item = dict(e)
+            ts = item.get("timestamp")
+            if isinstance(ts, datetime):
+                item["timestamp"] = ts.isoformat()
+            raw.append(item)
+
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(raw, f, ensure_ascii=False)
     except Exception as e:
-        print(f"[EVENTS] error saving events: {e}")
+        print("[EVENT SAVE ERROR]", e)
 
 
-def add_event(data: Dict[str, Any]) -> None:
-    """Append a single event to the in-memory store."""
-    from datetime import datetime as _dt
-
-    if "timestamp" not in data:
-        data["timestamp"] = _dt.now(TZ)
-    EVENTS.append(data)
+def add_event(event: Dict[str, Any]):
+    """Event toevoegen aan globale lijst."""
+    EVENTS.append(event)
 
 
-# --------------------------------------------------
-# Pokédex loading
-# --------------------------------------------------
-def load_pokedex() -> Dict[str, str]:
-    """Load pokedex.json into a dict (cached)."""
-    global _POKEDEX_CACHE
-    if _POKEDEX_CACHE is not None:
-        return _POKEDEX_CACHE
+def last_24h(events):
+    """Filter: enkel laatste 24 uur."""
+    cutoff = datetime.now(TZ) - timedelta(hours=24)
+    return [e for e in events if isinstance(e.get("timestamp"), datetime) and e["timestamp"] >= cutoff]
 
+
+# ---- Pokédex wrapper -------------------------------------------------
+
+def load_pokedex():
+    """Doorgeefluik naar pokedex.load_pokedex, zodat main hierop kan blijven leunen."""
     try:
-        with open(POKEDEX_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        # Normalize keys to upper-case strings
-        _POKEDEX_CACHE = {str(k).upper(): v for k, v in data.items()}
-        print(f"[POKEDEX] loaded {len(_POKEDEX_CACHE)} entries")
-    except FileNotFoundError:
-        _POKEDEX_CACHE = {}
-        print("[POKEDEX] pokedex.json not found, running with empty Pokédex")
+        from PXstats.pokedex import load_pokedex as _lp
+        return _lp()
     except Exception as e:
-        _POKEDEX_CACHE = {}
-        print(f"[POKEDEX] error loading pokedex.json: {e}")
-    return _POKEDEX_CACHE
-
-
-def get_pokedex() -> Dict[str, str]:
-    """Public accessor for Pokédex cache."""
-    return load_pokedex()
+        print("[POKEDEX WRAP ERROR]", e)
+        return {}
