@@ -1,204 +1,214 @@
-from datetime import datetime
+# PXstats • stats-v4.5 • 2025-11-14
+# ---------------------------------
+# - Encounters / Catches / Shinies
+# - Event breakdown (Wild / Incense / Lure / Quest / Raid / Rocket / Max / Runaways)
+# - Runaways (est.) = max(Fled, Encounters - Catches)
+# - Perfect 100 IV counter
+# - Latest Catches
+# - Latest Shinies (uit catches met shiny=True)
+# - NIEUW: Latest 100 IV (uit catches met IV 15/15/15)
+# ---------------------------------
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta
 from typing import List, Dict, Any
 
 import discord
 
-from PXstats.utils import last_24h, TZ
-
-STATS_VERSION = "v4.4"
+from PXstats.utils import TZ
 
 
-def _format_event_line(e: Dict[str, Any]) -> str:
-    """Format a single event for the latest lists."""
-    name = e.get("name", "?")
-    iv = e.get("iv")
-    ts: datetime = e.get("timestamp")
-
-    if isinstance(iv, (list, tuple)) and len(iv) == 3:
-        iv_str = f"{iv[0]}/{iv[1]}/{iv[2]}"
-    else:
-        iv_str = "-"
-
-    if isinstance(ts, datetime):
-        ts_str = ts.astimezone(TZ).strftime("%d %B %Y %H:%M")
-    else:
-        ts_str = "?"
-
-    return f"{name} {iv_str} ({ts_str})"
+def _last_24h(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Filter events van de laatste 24 uur."""
+    cutoff = datetime.now(TZ) - timedelta(hours=24)
+    out = []
+    for e in events:
+        ts = e.get("timestamp")
+        if isinstance(ts, datetime) and ts >= cutoff:
+            out.append(e)
+    return out
 
 
-def _compute_stats(events: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Compute all counters for the last 24h window.
+def _fmt_ts(dt: datetime) -> str:
+    return dt.strftime("%d %B %Y %H:%M")
 
-    Belangrijk:
-    - Encounters = alle outcomes (catch + flee), dus runaways tellen mee.
-    - Runaways komen uit echte 'Fled'-events.
-    """
-    rows = last_24h(events)
 
-    wild = incense = lure = quest = raid = rocket = maxb = 0
-    catches = shinies = runaways = 0
+def build_embed(all_events: List[Dict[str, Any]]) -> discord.Embed:
+    # Window = laatste 24h
+    window = _last_24h(all_events)
 
-    latest_catches: List[Dict[str, Any]] = []
-    latest_shinies: List[Dict[str, Any]] = []
+    # -------------------------------------------------
+    # Counters
+    # -------------------------------------------------
+    wild = incense = lure = quest = raid = rocket = max_b = runaways = 0
+    catches = 0
 
-    for e in rows:
+    shinies_from_catches: List[Dict[str, Any]] = []
+    perfect_from_catches: List[Dict[str, Any]] = []
+
+    for e in window:
         etype = e.get("type")
-        src = (e.get("source") or "").lower()
+        src = e.get("source")
+        iv = e.get("iv")
+        shiny_flag = bool(e.get("shiny"))
 
-        if etype in ("Catch", "Shiny"):
-            catches += 1
-            if etype == "Shiny":
-                shinies += 1
-                latest_shinies.append(e)
-
-            latest_catches.append(e)
-
-            # Bron breakdown (fallback = wild)
-            if src == "incense":
+        # Encounter breakdown
+        if etype == "Encounter":
+            if src == "wild":
+                wild += 1
+            elif src == "incense":
                 incense += 1
             elif src == "lure":
                 lure += 1
-            elif src == "quest":
-                quest += 1
-            elif src == "raid":
-                raid += 1
-            elif src == "rocket":
-                rocket += 1
-            elif src == "max":
-                maxb += 1
-            else:
-                wild += 1
 
+        elif etype == "Quest":
+            quest += 1
+        elif etype == "Raid":
+            raid += 1
+        elif etype == "Rocket":
+            rocket += 1
+        elif etype == "MaxBattle":
+            max_b += 1
         elif etype == "Fled":
-            # Pure runaway; we kennen de bron niet, dus enkel "Runaways".
             runaways += 1
 
-    # Totaal encounters = alle outcomes (catch of flee)
-    encounters = wild + incense + lure + quest + raid + rocket + maxb + runaways
+        # Catches & flags
+        if etype == "Catch":
+            catches += 1
 
-    # Catch rate op basis van echte outcomes
-    catch_rate = (catches / encounters * 100.0) if encounters > 0 else 0.0
+            if shiny_flag:
+                shinies_from_catches.append(e)
 
-    # Geen schatting meer, gewoon echte flee-count
-    runaways_est = runaways
+            if iv and len(iv) == 3 and iv[0] == 15 and iv[1] == 15 and iv[2] == 15:
+                perfect_from_catches.append(e)
 
-    # Perfect 100 IV (alleen catches / shinies)
-    perfect_100 = 0
-    for e in rows:
-        if e.get("type") not in ("Catch", "Shiny"):
-            continue
-        iv = e.get("iv")
-        if isinstance(iv, (list, tuple)) and tuple(iv) == (15, 15, 15):
-            perfect_100 += 1
+    # Encounters = alles wat je effectief gezien hebt
+    encounters = wild + incense + lure + quest + raid + rocket + max_b + runaways
 
-    # Laatste 5
-    latest_catches = sorted(
-        latest_catches,
-        key=lambda x: x.get("timestamp", datetime.min),
-        reverse=True,
-    )[:5]
-    latest_shinies = sorted(
-        latest_shinies,
-        key=lambda x: x.get("timestamp", datetime.min),
-        reverse=True,
-    )[:5]
+    # Shinies = aantal shiny catches
+    shinies = len(shinies_from_catches)
 
-    return {
-        "rows": rows,
-        "encounters": encounters,
-        "catches": catches,
-        "shinies": shinies,
-        "wild": wild,
-        "incense": incense,
-        "lure": lure,
-        "quest": quest,
-        "raid": raid,
-        "rocket": rocket,
-        "max": maxb,
-        "runaways": runaways,
-        "catch_rate": catch_rate,
-        "runaways_est": runaways_est,
-        "perfect_100": perfect_100,
-        "latest_catches": latest_catches,
-        "latest_shinies": latest_shinies,
-    }
+    # Perfect 100 IV = aantal perfect catches
+    perfect_100 = len(perfect_from_catches)
 
+    # Runaways (est.) = max(gezien flee-events, Enc - Catches)
+    runaways_est = max(runaways, max(0, encounters - catches))
 
-def build_embed(events: List[Dict[str, Any]]) -> discord.Embed:
-    """Build the Discord embed for /summary."""
-    s = _compute_stats(events)
+    # Catch rate
+    denom = catches + runaways_est
+    if denom > 0:
+        catch_rate = round(100.0 * catches / denom, 1)
+    else:
+        catch_rate = 0.0
 
+    # -------------------------------------------------
+    # Embed opbouwen
+    # -------------------------------------------------
     embed = discord.Embed(
         title="📊 Today’s Stats (Last 24h)",
-        colour=discord.Colour.blue(),
+        colour=discord.Colour.blurple()
     )
 
-    # Bovenste rij
-    embed.add_field(name="🕵️ Encounters", value=str(s["encounters"]), inline=True)
-    embed.add_field(name="🎯 Catches", value=str(s["catches"]), inline=True)
-    embed.add_field(name="✨ Shinies", value=str(s["shinies"]), inline=True)
+    # Top counters
+    embed.add_field(name="🧑‍✈️ Encounters", value=str(encounters), inline=True)
+    embed.add_field(name="🎯 Catches", value=str(catches), inline=True)
+    embed.add_field(name="✨ Shinies", value=str(shinies), inline=True)
 
     # Event breakdown
     breakdown_lines = [
-        f"🐾 Wild: {s['wild']}",
-        f"🧪 Incense: {s['incense']}",
-        f"🎣 Lure: {s['lure']}",
-        f"📜 Quest: {s['quest']}",
-        f"⚔️ Raid: {s['raid']}",
-        f"🚀 Rocket: {s['rocket']}",
-        f"⭕ Max: {s['max']}",
-        f"🏃 Runaways: {s['runaways']}",
+        f"🐾 Wild: {wild}",
+        f"🧪 Incense: {incense}",
+        f"🎣 Lure: {lure}",
+        f"📜 Quest: {quest}",
+        f"⚔️ Raid: {raid}",
+        f"🚀 Rocket: {rocket}",
+        f"⭕ Max: {max_b}",
+        f"🏃 Runaways: {runaways}",
     ]
     embed.add_field(
         name="📦 Event breakdown",
-        value="\n".join(breakdown_lines),
+        value="\n".join(breakdown_lines) if breakdown_lines else "—",
         inline=False,
     )
 
-    # Rates
-    embed.add_field(
-        name="🎯 Catch rate",
-        value=f"{s['catch_rate']:.1f}%",
-        inline=True,
-    )
-    embed.add_field(
-        name="🏃 Runaways (est.)",
-        value=str(s["runaways_est"]),
-        inline=True,
-    )
-    embed.add_field(
-        name="🏆 Perfect 100 IV",
-        value=str(s["perfect_100"]),
-        inline=True,
-    )
+    # Catch rate, runaways (est.), perfect
+    embed.add_field(name="🎯 Catch rate", value=f"{catch_rate:.1f}%", inline=True)
+    embed.add_field(name="🏃 Runaways (est.)", value=str(runaways_est), inline=True)
+    embed.add_field(name="🏆 Perfect 100 IV", value=str(perfect_100), inline=True)
 
-    # Laatste catches
-    if s["latest_catches"]:
-        latest_catches_str = "\n".join(_format_event_line(e) for e in s["latest_catches"])
+    # -------------------------------------------------
+    # Latest catches
+    # -------------------------------------------------
+    latest_catches = [e for e in window if e.get("type") == "Catch"][-5:]
+    if latest_catches:
+        lines = []
+        for e in reversed(latest_catches):
+            name = e.get("name", "?")
+            iv = e.get("iv") or (None, None, None)
+            ts = e.get("timestamp")
+            iv_str = f"{iv[0]}/{iv[1]}/{iv[2]}"
+            ts_str = _fmt_ts(ts) if isinstance(ts, datetime) else "?"
+            lines.append(f"{name} {iv_str} ({ts_str})")
+        latest_catches_text = "\n".join(lines)
     else:
-        latest_catches_str = "—"
+        latest_catches_text = "—"
+
     embed.add_field(
         name="🕒 Latest Catches",
-        value=latest_catches_str,
+        value=latest_catches_text,
         inline=False,
     )
 
-    # Laatste shinies
-    if s["latest_shinies"]:
-        latest_shinies_str = "\n".join(_format_event_line(e) for e in s["latest_shinies"])
+    # -------------------------------------------------
+    # Latest shinies (uit catches)
+    # -------------------------------------------------
+    latest_shinies = shinies_from_catches[-5:]
+    if latest_shinies:
+        lines = []
+        for e in reversed(latest_shinies):
+            name = e.get("name", "?")
+            iv = e.get("iv") or (None, None, None)
+            ts = e.get("timestamp")
+            iv_str = f"{iv[0]}/{iv[1]}/{iv[2]}"
+            ts_str = _fmt_ts(ts) if isinstance(ts, datetime) else "?"
+            lines.append(f"{name} {iv_str} ({ts_str})")
+        latest_shinies_text = "\n".join(lines)
     else:
-        latest_shinies_str = "—"
+        latest_shinies_text = "—"
+
     embed.add_field(
         name="✨ Latest Shinies",
-        value=latest_shinies_str,
+        value=latest_shinies_text,
+        inline=False,
+    )
+
+    # -------------------------------------------------
+    # NIEUW: Latest 100 IV
+    # -------------------------------------------------
+    latest_perfect = perfect_from_catches[-5:]
+    if latest_perfect:
+        lines = []
+        for e in reversed(latest_perfect):
+            name = e.get("name", "?")
+            iv = e.get("iv") or (None, None, None)
+            ts = e.get("timestamp")
+            iv_str = f"{iv[0]}/{iv[1]}/{iv[2]}"
+            ts_str = _fmt_ts(ts) if isinstance(ts, datetime) else "?"
+            lines.append(f"{name} {iv_str} ({ts_str})")
+        latest_perfect_text = "\n".join(lines)
+    else:
+        latest_perfect_text = "—"
+
+    embed.add_field(
+        name="🏅 Latest 100 IV",
+        value=latest_perfect_text,
         inline=False,
     )
 
     # Footer
-    rate_base = len(s["rows"])
-    today = datetime.now(TZ).strftime("%Y-%m-%d")
-    embed.set_footer(text=f"Rate base: {rate_base} • stats-{STATS_VERSION} • {today}")
+    embed.set_footer(
+        text=f"Rate base: {encounters} • stats-v4.5 • {datetime.now(TZ).date()}"
+    )
 
     return embed
