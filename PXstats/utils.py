@@ -1,81 +1,116 @@
 # ======================================================
-# PXstats • utils.py • 2025-11-13
-# Event storage + timezone
+# PXstats • utils.py • Final Stable Build • 14-11-2025
 # ======================================================
-
-from __future__ import annotations
 
 import json
-import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import os
 
-# Timezone (Brussels)
+# Timezone
 TZ = ZoneInfo("Europe/Brussels")
 
-# Padjes
-BASE_DIR = os.path.dirname(__file__)
-EVENT_FILE = os.path.join(BASE_DIR, "events.json")
+# Data storage
+EVENTS_FILE = "events.json"
+EVENTS = []
 
-# Globale event-list
-EVENTS: list[dict] = []
+# ------------------------------------------------------
+# POKEDEX LOADER
+# ------------------------------------------------------
 
+_pokedex_cache = None
 
-# ======================================================
-# EVENTS LADEN / OPSLAAN
-# ======================================================
+def load_pokedex():
+    """Load and cache the pokedex.json file."""
+    global _pokedex_cache
 
-def load_events() -> list[dict]:
-    """Laad events.json in de globale EVENTS-list (in-place)."""
-    EVENTS.clear()
+    if _pokedex_cache is not None:
+        return _pokedex_cache
 
-    if not os.path.exists(EVENT_FILE):
-        print("[EVENTS] Geen events.json gevonden, start leeg.")
-        return EVENTS
+    path = os.path.join("PXstats", "pokedex.json")
 
     try:
-        with open(EVENT_FILE, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
+            _pokedex_cache = json.load(f)
+            print(f"[POKEDEX] Loaded {len(_pokedex_cache)} entries")
+            return _pokedex_cache
+    except Exception as e:
+        print("[POKEDEX ERROR]", e)
+        _pokedex_cache = {}
+        return _pokedex_cache
+
+
+def get_pokedex():
+    """Return the cached Pokédex."""
+    return load_pokedex()
+
+
+# ------------------------------------------------------
+# EVENT STORAGE
+# ------------------------------------------------------
+
+def load_events():
+    """Load events from events.json."""
+    global EVENTS
+
+    try:
+        with open(EVENTS_FILE, "r", encoding="utf-8") as f:
             raw = json.load(f)
 
+        EVENTS = []
         for e in raw:
-            ts_str = e.get("timestamp")
-            if ts_str:
-                try:
-                    e["timestamp"] = datetime.fromisoformat(ts_str)
-                except Exception:
-                    # fallback: strip timezone als er iets raars in zit
-                    e["timestamp"] = datetime.fromisoformat(ts_str.split("+")[0])
-            else:
-                e["timestamp"] = datetime.now(TZ)
+            try:
+                ts = datetime.fromisoformat(e["timestamp"])
+            except:
+                ts = datetime.now(TZ)
 
-            EVENTS.append(e)
+            EVENTS.append({
+                "timestamp": ts,
+                "type": e.get("type"),
+                "name": e.get("name"),
+                "iv": e.get("iv"),
+                "source": e.get("source")
+            })
 
-        print(f"[EVENTS] Loaded {len(EVENTS)} events.")
-    except Exception as exc:
-        print(f"[EVENTS ERROR] {exc}")
+    except FileNotFoundError:
+        EVENTS = []
+    except Exception as e:
+        print("[LOAD EVENTS ERROR]", e)
+        EVENTS = []
 
-    return EVENTS
 
-
-def save_events() -> None:
-    """Schrijf EVENTS terug naar events.json."""
+def save_events():
+    """Save all events to JSON."""
     try:
-        to_save: list[dict] = []
+        out = []
         for e in EVENTS:
-            d = dict(e)
-            ts = d.get("timestamp")
-            if isinstance(ts, datetime):
-                d["timestamp"] = ts.isoformat()
-            to_save.append(d)
+            out.append({
+                "timestamp": e["timestamp"].isoformat(),
+                "type": e["type"],
+                "name": e["name"],
+                "iv": e.get("iv"),
+                "source": e.get("source"),
+            })
 
-        with open(EVENT_FILE, "w", encoding="utf-8") as f:
-            json.dump(to_save, f, indent=2)
+        with open(EVENTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(out, f, indent=2)
 
-        print(f"[EVENTS] Saved {len(EVENTS)} events.")
-    except Exception as exc:
-        print(f"[EVENTS SAVE ERROR] {exc}")
+    except Exception as e:
+        print("[SAVE EVENTS ERROR]", e)
 
 
-def add_event(ev: dict) -> None:
-    """Voeg één event toe aan de globale lijst."""
-    EVENTS.append(ev)
+def add_event(event):
+    """Add an event to memory."""
+    global EVENTS
+
+    if not isinstance(event["timestamp"], datetime):
+        try:
+            event["timestamp"] = datetime.fromisoformat(event["timestamp"])
+        except:
+            event["timestamp"] = datetime.now(TZ)
+
+    EVENTS.append(event)
+
+
+# Load events on import
+load_events()
