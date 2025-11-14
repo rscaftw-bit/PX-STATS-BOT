@@ -1,27 +1,39 @@
-# PXstats • pokedex.py
-# Lightweight helper around pokedex.json
+# PXstats • pokedex.py • v4.2
+# Leest pokedex.json en mapt ID → naam.
 
-from __future__ import annotations
+import os
+import json
+from functools import lru_cache
 
-from PXstats.utils import get_pokedex
+
+@lru_cache()
+def load_pokedex():
+    path = os.path.join(os.path.dirname(__file__), "pokedex.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        print(f"[POKEDEX] geladen: {len(data)} entries")
+        return data
+    except Exception as e:
+        print("[POKEDEX ERROR]", e)
+        return {}
 
 
-def get_name_from_id(code: str | int) -> str:
-    """Resolve a Pokédex id like '785' or '1017-C' to a Pokémon name.
-
-    Falls back to 'p<code>' if not found, so the UI still shows something.
+def get_name_from_id(pid):
     """
-    dex = get_pokedex()
-    key = str(code).upper()
+    pid kan zijn:
+    - int: 785
+    - str: "785" of "785-A"
+    """
+    dex = load_pokedex()
 
-    # Exact key
-    if key in dex:
-        return dex[key]
+    key = str(pid)
+    name = dex.get(key)
 
-    # Try without form suffix (e.g. '1017-C' -> '1017')
-    if "-" in key:
-        base = key.split("-", 1)[0]
-        if base in dex:
-            return dex[base]
+    if not name and "-" in key:
+        base, _ = key.split("-", 1)
+        name = dex.get(key) or dex.get(base)
 
-    return f"p{code}"
+    if not name:
+        return f"p{key}"
+    return name
