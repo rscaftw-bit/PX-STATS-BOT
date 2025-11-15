@@ -133,10 +133,19 @@ def parse_polygonx_embed(e: discord.Embed) -> Tuple[Optional[str], dict]:
         return "Rocket", data
 
     # RAID / MAX
-    if "raid battle encounter" in full_norm or "raid" in full_norm:
-        return "Raid", data
-    if "max battle" in full_norm:
-        return "MaxBattle", data
+# RAID
+if "raid battle encounter" in full_norm or "raid" in full_norm:
+    return "Raid", data
+
+# MAX / BREAD / TERA / ETC
+if any(x in full_norm for x in [
+    "max battle",
+    "bread battle",
+    "complete bread battle",
+    "tera raid battle",
+    "tera battle",
+]):
+    return "MaxBattle", data
 
     # FLED
     if any(x in full_norm for x in ["pokemon flee", "pokemon fled", "ran away", "fleed"]):
